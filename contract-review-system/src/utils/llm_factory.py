@@ -5,6 +5,7 @@ from typing import Optional
 from langchain_core.language_models import BaseLLM
 from langchain_community.llms import Ollama
 from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
 
 from config.settings import get_settings
 
@@ -21,15 +22,15 @@ class LLMFactory:
         创建LLM实例
 
         Args:
-            provider: LLM提供商 (mimo/openai/ollama)
+            provider: LLM提供商 (anthropic/openai/ollama)
 
         Returns:
             LLM实例
         """
         provider = provider or self.settings.LLM_PROVIDER
 
-        if provider == "mimo":
-            return self._create_mimo_llm()
+        if provider == "anthropic":
+            return self._create_anthropic_llm()
         elif provider == "openai":
             return self._create_openai_llm()
         elif provider == "ollama":
@@ -37,9 +38,9 @@ class LLMFactory:
         else:
             raise ValueError(f"不支持的LLM提供商: {provider}")
 
-    def _create_mimo_llm(self) -> BaseLLM:
-        """创建MIMO模型实例 (通过OpenAI兼容接口)"""
-        return ChatOpenAI(
+    def _create_anthropic_llm(self) -> BaseLLM:
+        """创建Anthropic/MIMO模型实例"""
+        return ChatAnthropic(
             model=self.settings.LLM_MODEL,
             api_key=self.settings.LLM_API_KEY,
             base_url=self.settings.LLM_API_BASE,

@@ -16,13 +16,13 @@ class Settings(BaseSettings):
     DATA_DIR: Path = PROJECT_ROOT / "data"
     LOG_DIR: Path = PROJECT_ROOT / "logs"
 
-    # LLM配置
-    LLM_PROVIDER: str = Field(default="mimo", description="LLM提供商")
-    LLM_MODEL: str = Field(default="mimo-7b", description="模型名称")
-    LLM_API_KEY: Optional[str] = Field(default=None, description="API密钥")
-    LLM_API_BASE: Optional[str] = Field(default=None, description="API基础URL")
-    LLM_TEMPERATURE: float = Field(default=0.7, description="温度参数")
-    LLM_MAX_TOKENS: int = Field(default=4096, description="最大token数")
+    # LLM配置 (MIMO模型)
+    LLM_PROVIDER: str = Field(default="anthropic", description="LLM提供商")
+    LLM_MODEL: str = Field(default="mimo-v2.5", description="模型名称")
+    LLM_API_KEY: Optional[str] = Field(default="tp-c44tgkiwl4rfp501sb73g0wg2v5561k4z49mymgbr51lgkrz", description="API密钥")
+    LLM_API_BASE: Optional[str] = Field(default="https://token-plan-cn.xiaomimimo.com/anthropic", description="API基础URL")
+    LLM_TEMPERATURE: float = Field(default=0.3, description="温度参数")
+    LLM_MAX_TOKENS: int = Field(default=10000, description="最大token数")
 
     # Redis配置
     REDIS_HOST: str = Field(default="localhost", description="Redis主机")
