@@ -1,3 +1,5 @@
 .vscode
 .venv
 contract-review-system/.venv
+__pycache__
+**/__pycache__
