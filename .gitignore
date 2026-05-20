@@ -1,2 +1,3 @@
-.vscode/
-.venv/
+.vscode
+.venv
+contract-review-system\.venv
