@@ -172,6 +172,34 @@
 
 ---
 
+## 实际进度 (已完成)
+
+### Day 5-7: 已完成的任务
+**状态**: ✅ 已完成
+
+- [x] MCP Server基础架构 (Day 5)
+- [x] 5个核心Agent实现 (Day 6)
+- [x] LangChain框架集成 (Day 7)
+- [x] API + RabbitMQ架构 (Day 7)
+- [x] DocumentParserAgent重构为LLM驱动
+
+### 待完成: LangChain能力集成
+**目标**: 将langchain_agent.py集成到现有Agent中
+
+**任务清单**:
+- [ ] 给协调器Agent添加对话历史能力
+- [ ] 集成contract_tools工具集
+- [ ] 实现多轮对话审查
+- [ ] 添加工具调用日志
+- [ ] 编写集成测试
+
+**验收标准**:
+- Agent可以使用工具进行分析
+- 对话历史正常保存
+- 工具调用可追溯
+
+---
+
 ## 第二周: 核心Agent实现
 
 ### Day 6 (周一): 协调器Agent设计与实现
