@@ -1,23 +1,30 @@
 """
-报告生成Agent模块 - 负责生成审查报告
+报告生成Agent模块 - LLM驱动，生成审查报告
 """
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 from datetime import datetime
+import re
+import json
 import logging
+
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
+try:
+    import json_repair
+    HAS_JSON_REPAIR = True
+except ImportError:
+    HAS_JSON_REPAIR = False
+
 
 class ReportGeneratorAgent(BaseAgent):
     """
-    报告生成Agent
+    报告生成Agent（LLM驱动版）
 
-    职责：
-    - 汇总各阶段分析结果
-    - 生成结构化审查报告
-    - 提供可视化数据
+    使用LLM生成专业的审查报告
     """
 
     def __init__(
@@ -33,7 +40,6 @@ class ReportGeneratorAgent(BaseAgent):
             description="负责生成合同审查报告",
             **kwargs
         )
-
         logger.info(f"报告生成Agent初始化完成: {name}")
 
     async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
@@ -51,230 +57,172 @@ class ReportGeneratorAgent(BaseAgent):
 
         logger.info("开始生成审查报告")
 
-        # 1. 提取各阶段结果
-        document_info = previous_results.get("parse_document", {}).get("result", {})
-        clause_analysis = previous_results.get("analyze_clauses", {}).get("result", {})
-        risk_assessment = previous_results.get("assess_risks", {}).get("result", {})
+        # LLM生成报告
+        result = await self._generate_with_llm(previous_results)
 
-        # 2. 生成报告
-        report = self._generate_report(
-            document_info,
-            clause_analysis,
-            risk_assessment
-        )
-
-        # 3. 生成摘要
-        summary = self._generate_summary(
-            document_info,
-            clause_analysis,
-            risk_assessment
-        )
-
-        # 4. 生成可视化数据
-        visualization = self._generate_visualization(
-            clause_analysis,
-            risk_assessment
-        )
-
-        result = {
-            "report": report,
-            "summary": summary,
-            "visualization": visualization,
-            "generated_at": datetime.now().isoformat(),
-        }
+        if "error" in result:
+            return result
 
         logger.info("审查报告生成完成")
         return result
 
-    def _generate_report(
-        self,
-        document_info: Dict[str, Any],
-        clause_analysis: Dict[str, Any],
-        risk_assessment: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def _generate_with_llm(self, previous_results: Dict[str, Any]) -> Dict[str, Any]:
         """
-        生成完整报告
+        使用LLM生成报告
 
         Args:
-            document_info: 文档信息
-            clause_analysis: 条款分析结果
-            risk_assessment: 风险评估结果
+            previous_results: 前面阶段的结果
 
         Returns:
-            报告内容
+            报告结果
         """
-        # 提取信息
-        doc_info = document_info.get("document_info", {})
-        contract_type = doc_info.get("contract_type", "general")
-        completeness = clause_analysis.get("analysis", {}).get("completeness", {})
-        risks = risk_assessment.get("risks", [])
-        recommendations = risk_assessment.get("recommendations", [])
+        # 提取各阶段结果
+        document_info = previous_results.get("parse_document", {}).get("result", {})
+        clause_analysis = previous_results.get("analyze_clauses", {}).get("result", {})
+        risk_assessment = previous_results.get("assess_risks", {}).get("result", {})
+
+        # 准备上下文
+        context = {
+            "document_info": document_info,
+            "clause_analysis": clause_analysis,
+            "risk_assessment": risk_assessment,
+        }
+
+        system_prompt = """你是一个专业的合同审查报告撰写专家。请根据以下分析结果生成一份完整的合同审查报告。
+
+输出格式要求（必须是严格有效的JSON）：
+{
+  "report": {
+    "title": "合同审查报告",
+    "executive_summary": "执行摘要（200字以内）",
+    "document_overview": {
+      "contract_type": "合同类型",
+      "parties": ["甲方", "乙方"],
+      "key_terms": "核心条款概述"
+    },
+    "completeness_analysis": {
+      "score": 0.8,
+      "found": ["已找到的条款"],
+      "missing": ["缺失的条款"],
+      "assessment": "完整性评估"
+    },
+    "risk_assessment": {
+      "overall_level": "风险等级",
+      "high_risks": ["高风险项"],
+      "medium_risks": ["中风险项"],
+      "low_risks": ["低风险项"]
+    },
+    "recommendations": [
+      {
+        "priority": "high/medium/low",
+        "category": "类别",
+        "content": "具体建议"
+      }
+    ],
+    "conclusion": {
+      "verdict": "建议签署/建议修改后签署/不建议签署",
+      "reason": "结论原因",
+      "next_steps": ["后续步骤"]
+    }
+  },
+  "summary": {
+    "risk_level": "风险等级",
+    "completeness_score": 0.8,
+    "total_issues": 5,
+    "verdict": "最终结论"
+  },
+  "visualization": {
+    "risk_distribution": {"high": 2, "medium": 3, "low": 1},
+    "completeness_bar": 80
+  }
+}
+
+规则：
+1. 报告要专业、清晰、易于理解
+2. 执行摘要要简洁明了
+3. 风险要按严重程度分类
+4. 建议要具体可执行
+5. 结论要明确
+6. 只输出JSON，不要其他内容"""
+
+        human_prompt = f"""分析结果上下文：
+{json.dumps(context, ensure_ascii=False, default=str)[:6000]}
+
+请根据以上分析结果生成完整的审查报告，只输出JSON。"""
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_prompt)
+        ]
+
+        try:
+            response = await self.llm.ainvoke(messages)
+            content = response.content
+
+            if isinstance(content, list):
+                content = content[0].get("text", "") if content else ""
+
+            result = self._parse_json(content.strip())
+
+            if isinstance(result, dict):
+                result["generated_at"] = datetime.now().isoformat()
+                return result
+        except Exception as e:
+            logger.error(f"LLM报告生成失败: {e}")
+
+        # 回退到基础报告
+        return self._generate_basic_report(context)
+
+    def _parse_json(self, content: str) -> Any:
+        """容错JSON解析"""
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0]
+
+        content = content.strip()
+
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            pass
+
+        if HAS_JSON_REPAIR:
+            try:
+                return json_repair.loads(content)
+            except Exception:
+                pass
+
+        try:
+            fixed = re.sub(r',\s*([}\]])', r'\1', content)
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            return None
+
+    def _generate_basic_report(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """生成基础报告（回退）"""
+        risk_assessment = context.get("risk_assessment", {})
         risk_level = risk_assessment.get("risk_level", "unknown")
 
-        # 生成报告各部分
-        report = {
-            "title": "合同审查报告",
+        verdict_map = {
+            "low": "建议签署",
+            "medium": "建议修改后签署",
+            "high": "建议大幅修改",
+            "critical": "不建议签署",
+        }
+
+        return {
+            "report": {
+                "title": "合同审查报告",
+                "executive_summary": "本报告基于自动化分析生成。",
+                "conclusion": {
+                    "verdict": verdict_map.get(risk_level, "需要人工审查"),
+                    "reason": f"整体风险等级: {risk_level}",
+                }
+            },
+            "summary": {
+                "risk_level": risk_level,
+                "verdict": verdict_map.get(risk_level, "需要人工审查"),
+            },
             "generated_at": datetime.now().isoformat(),
-            "executive_summary": self._generate_executive_summary(
-                contract_type, risk_level, len(risks)
-            ),
-            "document_overview": {
-                "contract_type": contract_type,
-                "text_length": doc_info.get("text_length", 0),
-                "sections_count": doc_info.get("sections_count", 0),
-            },
-            "completeness_analysis": {
-                "score": completeness.get("completeness_score", 0),
-                "found_clauses": completeness.get("found", []),
-                "missing_clauses": completeness.get("missing", []),
-            },
-            "risk_assessment": {
-                "overall_level": risk_level,
-                "total_risks": len(risks),
-                "high_risks": len([r for r in risks if r.get("severity") == "high"]),
-                "medium_risks": len([r for r in risks if r.get("severity") == "medium"]),
-                "low_risks": len([r for r in risks if r.get("severity") == "low"]),
-                "details": risks,
-            },
-            "recommendations": recommendations,
-            "conclusion": self._generate_conclusion(risk_level, len(risks)),
-        }
-
-        return report
-
-    def _generate_executive_summary(
-        self,
-        contract_type: str,
-        risk_level: str,
-        risk_count: int
-    ) -> str:
-        """生成执行摘要"""
-        type_names = {
-            "sales": "销售合同",
-            "service": "服务合同",
-            "lease": "租赁合同",
-            "labor": "劳动合同",
-            "nda": "保密协议",
-            "general": "一般合同",
-        }
-
-        type_name = type_names.get(contract_type, "合同")
-
-        level_descriptions = {
-            "low": "整体风险较低",
-            "medium": "存在一些需要关注的风险点",
-            "high": "存在较高风险，建议谨慎签署",
-            "critical": "存在严重风险，强烈建议修改后再签署",
-        }
-
-        summary = f"本报告针对一份{type_name}进行了全面审查。"
-        summary += f"经过分析，{level_descriptions.get(risk_level, '无法确定风险等级')}。"
-        summary += f"共发现 {risk_count} 个风险点需要关注。"
-
-        return summary
-
-    def _generate_conclusion(self, risk_level: str, risk_count: int) -> Dict[str, Any]:
-        """生成结论"""
-        conclusions = {
-            "low": {
-                "verdict": "建议签署",
-                "description": "合同条款较为完善，风险可控，建议在签署前再次确认关键条款。",
-            },
-            "medium": {
-                "verdict": "建议修改后签署",
-                "description": "合同存在一些风险点，建议在签署前与对方协商修改相关条款。",
-            },
-            "high": {
-                "verdict": "建议大幅修改",
-                "description": "合同存在较高风险，建议由专业法律人员审核并进行大幅修改。",
-            },
-            "critical": {
-                "verdict": "不建议签署",
-                "description": "合同存在严重风险，强烈建议重新谈判或放弃签署。",
-            },
-        }
-
-        conclusion = conclusions.get(risk_level, conclusions["medium"])
-
-        return {
-            "verdict": conclusion["verdict"],
-            "description": conclusion["description"],
-            "risk_level": risk_level,
-            "risk_count": risk_count,
-        }
-
-    def _generate_summary(
-        self,
-        document_info: Dict[str, Any],
-        clause_analysis: Dict[str, Any],
-        risk_assessment: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        生成摘要
-
-        Args:
-            document_info: 文档信息
-            clause_analysis: 条款分析结果
-            risk_assessment: 风险评估结果
-
-        Returns:
-            摘要内容
-        """
-        doc_info = document_info.get("document_info", {})
-        completeness = clause_analysis.get("analysis", {}).get("completeness", {})
-        risk_level = risk_assessment.get("risk_level", "unknown")
-        risks = risk_assessment.get("risks", [])
-
-        return {
-            "contract_type": doc_info.get("contract_type", "general"),
-            "completeness_score": completeness.get("completeness_score", 0),
-            "risk_level": risk_level,
-            "total_risks": len(risks),
-            "missing_clauses": len(completeness.get("missing", [])),
-            "recommendations_count": len(risk_assessment.get("recommendations", [])),
-        }
-
-    def _generate_visualization(
-        self,
-        clause_analysis: Dict[str, Any],
-        risk_assessment: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        生成可视化数据
-
-        Args:
-            clause_analysis: 条款分析结果
-            risk_assessment: 风险评估结果
-
-        Returns:
-            可视化数据
-        """
-        risks = risk_assessment.get("risks", [])
-
-        # 风险分布数据
-        risk_distribution = {
-            "high": len([r for r in risks if r.get("severity") == "high"]),
-            "medium": len([r for r in risks if r.get("severity") == "medium"]),
-            "low": len([r for r in risks if r.get("severity") == "low"]),
-        }
-
-        # 风险类别数据
-        risk_categories = {}
-        for risk in risks:
-            category = risk.get("category", "other")
-            if category not in risk_categories:
-                risk_categories[category] = 0
-            risk_categories[category] += 1
-
-        # 完整性数据
-        completeness = clause_analysis.get("analysis", {}).get("completeness", {})
-        completeness_data = {
-            "found": len(completeness.get("found", [])),
-            "missing": len(completeness.get("missing", [])),
-        }
-
-        return {
-            "risk_distribution": risk_distribution,
-            "risk_categories": risk_categories,
-            "completeness_data": completeness_data,
         }

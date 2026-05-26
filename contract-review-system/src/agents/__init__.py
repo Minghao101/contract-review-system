@@ -10,6 +10,7 @@ from .clause_analysis_agent import ClauseAnalysisAgent
 from .risk_assessment_agent import RiskAssessmentAgent
 from .report_generator_agent import ReportGeneratorAgent
 from .langchain_agent import LangChainAgentWrapper, create_llm_agent
+from .agent_tools import AgentTools, AgentWithTools
 
 __all__ = [
     "BaseAgent",
@@ -24,4 +25,6 @@ __all__ = [
     "ReportGeneratorAgent",
     "LangChainAgentWrapper",
     "create_llm_agent",
+    "AgentTools",
+    "AgentWithTools",
 ]

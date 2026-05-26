@@ -1,5 +1,5 @@
 """
-Agent基础测试模块
+Agent测试模块
 """
 import sys
 from pathlib import Path
@@ -9,137 +9,225 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 import asyncio
-from src.agents.base_agent import BaseAgent
-from src.agents.communication import AgentMessage, MessageType, MessageBus
+from src.agents import (
+    CoordinatorAgent,
+    DocumentParserAgent,
+    ClauseAnalysisAgent,
+    RiskAssessmentAgent,
+    ReportGeneratorAgent,
+)
 
 
-class MockAgent(BaseAgent):
-    """模拟Agent用于测试"""
+# 测试合同文本
+SAMPLE_CONTRACT = """
+技术服务合同
 
-    async def process(self, task: dict) -> dict:
-        """处理任务"""
-        return {
-            "agent_id": self.agent_id,
-            "status": "completed",
-            "result": f"任务已处理: {task.get('content', '')}"
+甲方：北京科技有限公司
+乙方：上海软件有限公司
+
+一、合同标的
+乙方为甲方提供技术开发服务，包括系统设计、编码实现和测试。
+
+二、服务期限
+合同有效期自2024年1月1日至2024年12月31日。
+
+三、服务费用
+服务总费用为人民币50万元，甲方应在合同签订后预付全款。
+
+四、违约责任
+如甲方违约，应承担无限责任，赔偿乙方一切损失。
+
+五、争议解决
+如发生争议，由乙方所在地法院管辖。
+"""
+
+
+def test_document_parser():
+    """测试文档解析Agent"""
+    print("测试文档解析Agent...")
+
+    agent = DocumentParserAgent()
+
+    task = {
+        "contract_text": SAMPLE_CONTRACT,
+        "contract_type": "service"
+    }
+
+    result = asyncio.run(agent.process(task))
+
+    assert "document_info" in result
+    assert result["document_info"]["contract_type"] == "service"
+    assert len(result["sections"]) > 0
+    assert len(result["dates"]) > 0
+
+    print(f"  - 合同类型: {result['document_info']['contract_type']}")
+    print(f"  - 条款数: {len(result['sections'])}")
+    print(f"  - 日期数: {len(result['dates'])}")
+    print("文档解析Agent测试通过！")
+    return True
+
+
+def test_clause_analysis():
+    """测试条款分析Agent"""
+    print("测试条款分析Agent...")
+
+    agent = ClauseAnalysisAgent()
+
+    task = {
+        "contract_text": SAMPLE_CONTRACT,
+        "review_focus": ["违约责任", "付款条款"]
+    }
+
+    result = asyncio.run(agent.process(task))
+
+    assert "analysis" in result
+    assert "completeness" in result["analysis"]
+    assert "ambiguous_clauses" in result["analysis"]
+
+    completeness = result["analysis"]["completeness"]
+    print(f"  - 完整性得分: {completeness.get('completeness_score', 0):.2%}")
+    print(f"  - 缺少条款: {completeness.get('missing_clauses', completeness.get('missing', []))}")
+    print(f"  - 模糊条款数: {len(result['analysis']['ambiguous_clauses'])}")
+    print("条款分析Agent测试通过！")
+    return True
+
+
+def test_risk_assessment():
+    """测试风险评估Agent"""
+    print("测试风险评估Agent...")
+
+    agent = RiskAssessmentAgent()
+
+    task = {
+        "contract_text": SAMPLE_CONTRACT,
+        "contract_type": "service"
+    }
+
+    result = asyncio.run(agent.process(task))
+
+    assert "risk_level" in result
+    assert "risks" in result
+    assert "recommendations" in result
+
+    print(f"  - 风险等级: {result['risk_level']}")
+    print(f"  - 风险数量: {len(result['risks'])}")
+    for risk in result['risks'][:3]:
+        print(f"    - {risk['name']} ({risk['severity']})")
+    print("风险评估Agent测试通过！")
+    return True
+
+
+def test_report_generator():
+    """测试报告生成Agent"""
+    print("测试报告生成Agent...")
+
+    agent = ReportGeneratorAgent()
+
+    # 模拟前面阶段的结果
+    previous_results = {
+        "parse_document": {
+            "result": {
+                "document_info": {
+                    "contract_type": "service",
+                    "text_length": len(SAMPLE_CONTRACT),
+                    "sections_count": 5,
+                }
+            }
+        },
+        "analyze_clauses": {
+            "result": {
+                "analysis": {
+                    "completeness": {
+                        "score": 0.8,
+                        "found": ["服务内容", "服务期限", "服务费用", "违约责任"],
+                        "missing": ["保密条款"],
+                    }
+                }
+            }
+        },
+        "assess_risks": {
+            "result": {
+                "risk_level": "high",
+                "risks": [
+                    {"name": "无限责任风险", "severity": "high"},
+                    {"name": "预付全款风险", "severity": "medium"},
+                ],
+                "recommendations": [
+                    {"suggestion": "修改违约责任条款"}
+                ]
+            }
         }
+    }
 
+    task = {"previous_results": previous_results}
 
-def test_base_agent():
-    """测试BaseAgent"""
-    print("测试BaseAgent...")
+    result = asyncio.run(agent.process(task))
 
-    agent = MockAgent(
-        agent_id="test_agent_001",
-        name="测试Agent",
-        role="测试",
-        description="用于测试的Agent"
-    )
+    assert "report" in result
+    assert "summary" in result
+    assert "generated_at" in result
 
-    # 测试Agent状态
-    assert agent.agent_id == "test_agent_001"
-    assert agent.name == "测试Agent"
-    assert agent.is_running == False
-
-    # 测试状态获取
-    status = agent.get_status()
-    assert status["agent_id"] == "test_agent_001"
-    assert status["is_running"] == False
-
-    print("BaseAgent测试通过！")
+    report = result["report"]
+    print(f"  - 报告标题: {report['title']}")
+    print(f"  - 结论: {report['conclusion']['verdict']}")
+    print("报告生成Agent测试通过！")
     return True
 
 
-async def test_agent_process():
-    """测试Agent任务处理"""
-    print("测试Agent任务处理...")
+def test_coordinator():
+    """测试协调器Agent"""
+    print("测试协调器Agent...")
 
-    agent = MockAgent(
-        agent_id="test_agent_002",
-        name="测试Agent2",
-        role="测试"
-    )
+    # 创建协调器
+    coordinator = CoordinatorAgent()
 
-    # 测试任务处理
-    task = {"content": "测试任务"}
-    result = await agent.process(task)
+    # 创建并注册其他Agent
+    doc_parser = DocumentParserAgent()
+    clause_analyst = ClauseAnalysisAgent()
+    risk_assessor = RiskAssessmentAgent()
+    report_generator = ReportGeneratorAgent()
 
-    assert result["status"] == "completed"
-    assert "测试任务" in result["result"]
+    coordinator.register_agent(doc_parser)
+    coordinator.register_agent(clause_analyst)
+    coordinator.register_agent(risk_assessor)
+    coordinator.register_agent(report_generator)
 
-    print("Agent任务处理测试通过！")
-    return True
+    # 检查注册状态
+    agents = coordinator.get_registered_agents()
+    assert len(agents) == 4
 
+    # 执行审查任务
+    task = {
+        "contract_text": SAMPLE_CONTRACT,
+        "contract_type": "service",
+        "review_focus": ["违约责任"]
+    }
 
-def test_message():
-    """测试消息"""
-    print("测试消息...")
+    result = asyncio.run(coordinator.process(task))
 
-    message = AgentMessage(
-        sender_id="agent_001",
-        receiver_id="agent_002",
-        message_type=MessageType.TASK_ASSIGN,
-        content={"task_id": "task_001", "content": "测试任务"}
-    )
+    assert "status" in result
+    assert result["status"] in ["completed", "partial_failed"]
+    assert "risk_level" in result
 
-    # 测试消息属性
-    assert message.sender_id == "agent_001"
-    assert message.receiver_id == "agent_002"
-    assert message.message_type == MessageType.TASK_ASSIGN
-
-    # 测试序列化
-    msg_dict = message.to_dict()
-    assert msg_dict["sender_id"] == "agent_001"
-
-    # 测试反序列化
-    msg_restored = AgentMessage.from_dict(msg_dict)
-    assert msg_restored.sender_id == "agent_001"
-
-    print("消息测试通过！")
-    return True
-
-
-def test_message_bus():
-    """测试消息总线"""
-    print("测试消息总线...")
-
-    bus = MessageBus()
-    received_messages = []
-
-    # 订阅消息
-    def callback(message):
-        received_messages.append(message)
-
-    bus.subscribe("agent_002", callback)
-
-    # 发布消息
-    message = AgentMessage(
-        sender_id="agent_001",
-        receiver_id="agent_002",
-        message_type=MessageType.NOTIFICATION,
-        content={"info": "测试通知"}
-    )
-    bus.publish(message)
-
-    # 验证消息接收
-    assert len(received_messages) == 1
-    assert received_messages[0].sender_id == "agent_001"
-
-    print("消息总线测试通过！")
+    print(f"  - 审查状态: {result['status']}")
+    print(f"  - 风险等级: {result['risk_level']}")
+    print(f"  - 已注册Agent数: {len(agents)}")
+    print("协调器Agent测试通过！")
     return True
 
 
 def run_all_tests():
     """运行所有测试"""
     print("=" * 50)
-    print("开始运行Agent基础测试")
+    print("开始运行Agent测试")
     print("=" * 50)
 
     tests = [
-        test_base_agent(),
-        asyncio.run(test_agent_process()),
-        test_message(),
-        test_message_bus(),
+        test_document_parser(),
+        test_clause_analysis(),
+        test_risk_assessment(),
+        test_report_generator(),
+        test_coordinator(),
     ]
 
     passed = sum(1 for t in tests if t)
