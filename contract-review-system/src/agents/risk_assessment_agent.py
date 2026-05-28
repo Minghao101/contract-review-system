@@ -67,6 +67,11 @@ class RiskAssessmentAgent(BaseAgent):
         if "error" in result:
             return result
 
+        # 风险量化
+        risks = result.get("risks", [])
+        result["risk_quantification"] = self.quantify_risk(risks)
+        result["mitigation_plan"] = self.suggest_mitigation(risks)
+
         logger.info(f"风险评估完成，风险等级: {result.get('risk_level', 'unknown')}")
         return result
 
@@ -150,6 +155,117 @@ class RiskAssessmentAgent(BaseAgent):
 
         # 回退到基础评估
         return self._assess_with_regex(text)
+
+    def quantify_risk(self, risks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        量化风险评估
+
+        Args:
+            risks: 风险列表
+
+        Returns:
+            风险量化结果
+        """
+        severity_weights = {"high": 3, "medium": 2, "low": 1}
+        category_weights = {
+            "liability": 1.5,
+            "payment": 1.3,
+            "ip": 1.4,
+            "termination": 1.2,
+            "dispute": 1.3,
+            "confidentiality": 1.1,
+        }
+
+        total_weighted_score = 0
+        distribution = {"high": 0, "medium": 0, "low": 0}
+        category_scores = {}
+
+        for risk in risks:
+            severity = risk.get("severity", "low")
+            category = risk.get("category", "other")
+
+            sev_weight = severity_weights.get(severity, 1)
+            cat_weight = category_weights.get(category, 1.0)
+            risk_score = sev_weight * cat_weight
+
+            total_weighted_score += risk_score
+            distribution[severity] = distribution.get(severity, 0) + 1
+
+            if category not in category_scores:
+                category_scores[category] = 0
+            category_scores[category] += risk_score
+
+        # 归一化到 0-100 分（风险越高分数越高）
+        max_possible = len(risks) * 3 * 1.5 if risks else 1
+        normalized_score = min(100, int((total_weighted_score / max_possible) * 100))
+
+        return {
+            "risk_score": normalized_score,
+            "total_weighted_score": round(total_weighted_score, 2),
+            "risk_distribution": distribution,
+            "category_scores": {k: round(v, 2) for k, v in category_scores.items()},
+            "total_risks": len(risks),
+        }
+
+    def suggest_mitigation(self, risks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        为高/中风险生成缓解建议
+
+        Args:
+            risks: 风险列表
+
+        Returns:
+            缓解计划列表
+        """
+        mitigation_templates = {
+            "liability": {
+                "mitigation": "建议设置责任上限，明确赔偿范围和免责条款",
+                "estimated_cost": "low",
+            },
+            "payment": {
+                "mitigation": "建议明确付款节点、逾期利息和付款条件",
+                "estimated_cost": "low",
+            },
+            "ip": {
+                "mitigation": "建议明确知识产权归属、使用范围和侵权责任",
+                "estimated_cost": "medium",
+            },
+            "termination": {
+                "mitigation": "建议增加提前通知期，明确终止后的权利义务处理",
+                "estimated_cost": "low",
+            },
+            "dispute": {
+                "mitigation": "建议约定争议解决方式（仲裁/诉讼）和管辖法院",
+                "estimated_cost": "low",
+            },
+            "confidentiality": {
+                "mitigation": "建议限定保密范围和期限，明确违约责任",
+                "estimated_cost": "low",
+            },
+        }
+
+        mitigation_plan = []
+        for risk in risks:
+            if risk.get("severity") in ("high", "medium"):
+                category = risk.get("category", "other")
+                template = mitigation_templates.get(category, {
+                    "mitigation": "建议与专业法律顾问确认相关条款",
+                    "estimated_cost": "medium",
+                })
+
+                mitigation_plan.append({
+                    "risk_name": risk.get("name", "未知风险"),
+                    "severity": risk.get("severity"),
+                    "mitigation": risk.get("suggestion", template["mitigation"]),
+                    "priority": "high" if risk.get("severity") == "high" else "medium",
+                    "estimated_cost": template["estimated_cost"],
+                })
+
+        # 按优先级排序
+        priority_order = {"high": 0, "medium": 1}
+        mitigation_plan.sort(key=lambda x: priority_order.get(x["priority"], 2))
+
+        return mitigation_plan
 
     def _parse_json(self, content: str) -> Any:
         """容错JSON解析"""

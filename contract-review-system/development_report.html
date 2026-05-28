@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智能合同审查系统 - 开发进度报告</title>
+<style>
+:root {
+  --primary: #2c3e50;
+  --accent: #3498db;
+  --success: #27ae60;
+  --warning: #f39c12;
+  --danger: #e74c3c;
+  --bg: #f5f6fa;
+  --card: #ffffff;
+  --text: #2d3436;
+  --text-light: #636e72;
+  --border: #dfe6e9;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Microsoft YaHei', 'PingFang SC', -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+
+.header {
+  background: linear-gradient(135deg, var(--primary) 0%, #34495e 50%, var(--accent) 100%);
+  color: white; padding: 40px 0; text-align: center;
+}
+.header h1 { font-size: 32px; margin-bottom: 8px; }
+.header .subtitle { opacity: 0.85; font-size: 16px; }
+.header .meta { margin-top: 16px; display: flex; justify-content: center; gap: 24px; font-size: 14px; opacity: 0.8; }
+.header .meta span { background: rgba(255,255,255,0.15); padding: 4px 12px; border-radius: 12px; }
+
+.container { max-width: 1100px; margin: 0 auto; padding: 24px 20px; }
+
+/* Overview Cards */
+.overview { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
+.overview-card { background: var(--card); border-radius: 10px; padding: 20px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.overview-card .number { font-size: 36px; font-weight: bold; }
+.overview-card .label { font-size: 13px; color: var(--text-light); margin-top: 4px; }
+.overview-card.blue .number { color: var(--accent); }
+.overview-card.green .number { color: var(--success); }
+.overview-card.orange .number { color: var(--warning); }
+.overview-card.red .number { color: var(--danger); }
+
+/* Progress Bar */
+.progress-section { background: var(--card); border-radius: 10px; padding: 20px 24px; margin-bottom: 32px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.progress-section h2 { font-size: 18px; margin-bottom: 12px; color: var(--primary); }
+.progress-bar-outer { background: #ecf0f1; border-radius: 10px; height: 24px; overflow: hidden; position: relative; }
+.progress-bar-inner { background: linear-gradient(90deg, var(--success), #2ecc71); height: 100%; border-radius: 10px; transition: width 0.5s; display: flex; align-items: center; justify-content: center; color: white; font-size: 13px; font-weight: bold; }
+.progress-labels { display: flex; justify-content: space-between; margin-top: 8px; font-size: 12px; color: var(--text-light); }
+
+/* Day Cards */
+.day-section { margin-bottom: 24px; }
+.day-card { background: var(--card); border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow: hidden; margin-bottom: 16px; }
+.day-header { padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+.day-header h3 { font-size: 17px; color: var(--primary); }
+.day-header .day-num { background: var(--accent); color: white; padding: 3px 12px; border-radius: 12px; font-size: 13px; font-weight: bold; }
+.day-header .status { padding: 3px 12px; border-radius: 12px; font-size: 13px; font-weight: bold; }
+.day-header .status.done { background: #d5f5e3; color: #1e8449; }
+.day-header .status.pending { background: #fdebd0; color: #d35400; }
+
+.day-body { padding: 0 20px 16px 20px; }
+.day-body h4 { font-size: 14px; color: var(--accent); margin: 12px 0 6px 0; }
+.day-body ul { padding-left: 20px; }
+.day-body li { font-size: 14px; margin-bottom: 4px; }
+
+.file-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.file-tag { background: #eaf2f8; color: #2471a3; padding: 3px 10px; border-radius: 6px; font-size: 12px; font-family: Consolas, monospace; }
+.file-tag.new { background: #d5f5e3; color: #1e8449; }
+
+/* Architecture */
+.arch-section { background: var(--card); border-radius: 10px; padding: 24px; margin-bottom: 32px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.arch-section h2 { font-size: 18px; color: var(--primary); margin-bottom: 16px; border-bottom: 2px solid var(--accent); padding-bottom: 8px; }
+.arch-diagram { background: #2d3436; color: #dfe6e9; padding: 20px; border-radius: 8px; font-family: Consolas, monospace; font-size: 13px; line-height: 1.8; overflow-x: auto; white-space: pre; }
+
+/* File Table */
+.file-table-section { background: var(--card); border-radius: 10px; padding: 24px; margin-bottom: 32px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.file-table-section h2 { font-size: 18px; color: var(--primary); margin-bottom: 16px; border-bottom: 2px solid var(--accent); padding-bottom: 8px; }
+.file-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.file-table th { background: #f8f9fa; padding: 10px 12px; text-align: left; border-bottom: 2px solid var(--border); font-weight: 600; }
+.file-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.file-table tr:hover { background: #f8f9fa; }
+.file-table .path { font-family: Consolas, monospace; font-size: 13px; color: #2471a3; }
+.file-table .desc { color: var(--text-light); }
+
+.footer { text-align: center; padding: 32px 0; color: var(--text-light); font-size: 13px; }
+
+@media (max-width: 768px) {
+  .overview { grid-template-columns: repeat(2, 1fr); }
+  .header h1 { font-size: 24px; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>智能合同审查系统</h1>
+  <div class="subtitle">开发进度报告 — Days 1-14</div>
+  <div class="meta">
+    <span>项目周期: 30天</span>
+    <span>已完成: 14天</span>
+    <span>报告日期: 2026-05-26</span>
+  </div>
+</div>
+
+<div class="container">
+
+<!-- Overview -->
+<div class="overview">
+  <div class="overview-card blue">
+    <div class="number">50%</div>
+    <div class="label">整体进度</div>
+  </div>
+  <div class="overview-card green">
+    <div class="number">6</div>
+    <div class="label">核心Agent</div>
+  </div>
+  <div class="overview-card orange">
+    <div class="number">12</div>
+    <div class="label">Skills模块</div>
+  </div>
+  <div class="overview-card red">
+    <div class="number">50+</div>
+    <div class="label">源文件数</div>
+  </div>
+</div>
+
+<!-- Progress Bar -->
+<div class="progress-section">
+  <h2>开发进度</h2>
+  <div class="progress-bar-outer">
+    <div class="progress-bar-inner" style="width: 56%">14 / 25 天</div>
+  </div>
+  <div class="progress-labels">
+    <span>Day 1: 项目初始化</span>
+    <span>Day 14: 报告生成Skills</span>
+    <span>Day 25: 项目交付</span>
+  </div>
+</div>
+
+<!-- Architecture -->
+<div class="arch-section">
+  <h2>系统架构总览</h2>
+  <div class="arch-diagram">
+┌─────────────────────────────────────────────────────────────────────┐
+│                        智能合同审查系统                              │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │                    CoordinatorAgent (协调器)                  │   │
+│  │     任务分解 → Agent调度 → 结果汇总 → 报告生成              │   │
+│  └────────────┬────────────┬────────────┬────────────┬──────────┘   │
+│               │            │            │            │              │
+│  ┌────────────▼──┐ ┌───────▼──────┐ ┌──▼──────────┐ ┌▼───────────┐ │
+│  │ DocumentParser│ │   Clause     │ │    Risk     │ │ Compliance │ │
+│  │    Agent      │ │  Analysis    │ │  Assessment │ │  Checker   │ │
+│  │  (文档解析)   │ │    Agent     │ │    Agent    │ │   Agent    │ │
+│  └───────┬───────┘ │  (条款分析)  │ │  (风险评估) │ │  (合规检查)│ │
+│          │         └──────┬───────┘ └──────┬──────┘ └─────┬──────┘ │
+│          │                │                │              │        │
+│  ┌───────▼────────────────▼────────────────▼──────────────▼──────┐ │
+│  │                     Skills 能力层                              │ │
+│  │  文档处理: PDF | DOCX | OCR                                   │ │
+│  │  法律分析: 条款解析 | 法规检查 | 案例检索                      │ │
+│  │  风险管理: 风险识别 | 风险量化 | 缓解建议                      │ │
+│  │  报告生成: 综合报告 | 可视化 | 导出                            │ │
+│  └──────────────────────────────────────────────────────────────┘ │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐ │
+│  │                    基础设施层                                 │ │
+│  │  SharedMemory | AgentPrivateMemory | MCP Server | LLM API   │ │
+│  └──────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────┘</div>
+</div>
+
+<!-- Day 1 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 1</span> &nbsp;项目初始化与环境配置</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>创建项目目录结构 (agents, memory, mcp, skills, utils, api)</li>
+      <li>初始化Python虚拟环境，安装Claude Agent SDK及依赖</li>
+      <li>配置开发工具 (linting, formatting, type checking)</li>
+      <li>创建README和项目文档框架</li>
+    </ul>
+    <h4>新增文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">requirements.txt</span>
+      <span class="file-tag new">pyproject.toml</span>
+      <span class="file-tag new">README.md</span>
+      <span class="file-tag new">src/__init__.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 2 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 2</span> &nbsp;基础Agent框架设计</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>设计并实现 <code>BaseAgent</code> 抽象基类 (agent_id, name, role, llm)</li>
+      <li>定义Agent间通信协议 (AgentMessage)</li>
+      <li>实现Agent生命周期管理 (初始化、运行、停止)</li>
+      <li>LLM集成: 通过LLMFactory支持多提供商 (Anthropic/OpenAI/Ollama)</li>
+    </ul>
+    <h4>新增文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">src/agents/base_agent.py</span>
+      <span class="file-tag new">src/agents/communication.py</span>
+      <span class="file-tag new">src/utils/llm_factory.py</span>
+      <span class="file-tag new">src/agents/__init__.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 3 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 3</span> &nbsp;共享记忆系统实现</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>实现 <code>SharedMemoryManager</code> — 基于层的存储 (CONTEXT/ANALYSIS/DECISION)</li>
+      <li>线程安全读写 (threading.Lock)</li>
+      <li>Observer模式记忆通知机制</li>
+      <li>记忆版本控制</li>
+    </ul>
+    <h4>新增文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">src/memory/shared_memory.py</span>
+      <span class="file-tag new">src/memory/memory_layer.py</span>
+      <span class="file-tag new">src/memory/__init__.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 4 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 4</span> &nbsp;Agent私有记忆实现</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>实现 <code>AgentPrivateMemory</code> — 上下文窗口管理</li>
+      <li>上下文压缩机制 (超阈值时压缩早期对话)</li>
+      <li>缓存机制 + 文件持久化</li>
+      <li>任务状态跟踪</li>
+    </ul>
+    <h4>新增文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">src/memory/private_memory.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 5 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 5</span> &nbsp;MCP Server基础架构</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>研究MCP协议规范</li>
+      <li>实现 <code>MCPServer</code> 基类 (工具注册、请求/响应处理)</li>
+      <li>实现 <code>MCPClient</code> 客户端</li>
+      <li>实现MCP协议层 (协议定义、消息格式)</li>
+    </ul>
+    <h4>新增文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">src/mcp/server.py</span>
+      <span class="file-tag new">src/mcp/client.py</span>
+      <span class="file-tag new">src/mcp/protocol.py</span>
+      <span class="file-tag new">src/mcp/__init__.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 6 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 6</span> &nbsp;协调器Agent实现</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>实现 <code>CoordinatorAgent</code> — LLM动态任务分解与调度</li>
+      <li>任务分配策略: 支持串行/并行执行 (asyncio.gather)</li>
+      <li>结果汇总逻辑: 汇总所有Agent的分析结果</li>
+      <li>默认审查计划: parse → analyze → assess → report</li>
+    </ul>
+    <h4>新增文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">src/agents/coordinator_agent.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 7 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 7</span> &nbsp;合同解析Agent + API架构</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>实现 <code>DocumentParserAgent</code> — LLM驱动的合同解析</li>
+      <li>元数据提取 (合同类型、当事人、日期、金额)</li>
+      <li>FastAPI后端: /api/v1/review, /api/v1/upload接口</li>
+      <li>RabbitMQ异步任务处理 (含直连回退)</li>
+      <li>TaskManager任务管理器</li>
+    </ul>
+    <h4>新增文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">src/agents/document_parser_agent.py</span>
+      <span class="file-tag new">src/api/main.py</span>
+      <span class="file-tag new">src/api/routes.py</span>
+      <span class="file-tag new">src/api/task_manager.py</span>
+      <span class="file-tag new">src/api/document_parser.py</span>
+      <span class="file-tag new">src/api/__init__.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 8 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 8</span> &nbsp;条款分析Agent实现</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>实现 <code>ClauseAnalysisAgent</code> — LLM驱动条款深度分析</li>
+      <li>歧义检测 (正则规则 + LLM双重检测)</li>
+      <li>完整性评估 (必备条款检查)</li>
+      <li>权利义务分析 + 条款关系图</li>
+    </ul>
+    <h4>新增文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">src/agents/clause_analysis_agent.py</span>
+      <span class="file-tag new">src/agents/report_generator_agent.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 9 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 9</span> &nbsp;风险评估Agent增强</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>增强 <code>RiskAssessmentAgent</code> — 新增 <code>quantify_risk()</code> 风险量化方法</li>
+      <li>加权评分: severity_weights (high=3, medium=2, low=1) x category_weights</li>
+      <li>新增 <code>suggest_mitigation()</code> 风险缓解建议生成</li>
+      <li>12套缓解模板 + 条款修改模板</li>
+    </ul>
+    <h4>修改文件</h4>
+    <div class="file-list">
+      <span class="file-tag">src/agents/risk_assessment_agent.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 10 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 10</span> &nbsp;合规检查Agent</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>新建 <code>ComplianceCheckerAgent</code> — LLM驱动法规合规检查</li>
+      <li>7种合同类型的必备条款字典 (sales/service/lease/labor/nda/partnership/general)</li>
+      <li>LLM分析 + 规则回退双重检测</li>
+      <li>自动计算合规评分 + 缺失条款检测</li>
+      <li>Coordinator默认计划更新: 增加compliance_check步骤</li>
+    </ul>
+    <h4>新增/修改文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">src/agents/compliance_checker_agent.py</span>
+      <span class="file-tag">src/agents/coordinator_agent.py</span>
+      <span class="file-tag">src/api/task_manager.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 11 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 11</span> &nbsp;文档处理Skills开发</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>实现 <code>PDFReaderSkill</code> — PDF文本提取 (PyPDF2 + pdfplumber)</li>
+      <li>实现 <code>DocxParserSkill</code> — Word文档解析 (python-docx)</li>
+      <li>实现 <code>OCRProcessorSkill</code> — OCR文字识别 (Pillow图像处理)</li>
+      <li>BaseSkill抽象基类 + SkillRegistry注册机制</li>
+    </ul>
+    <h4>新增文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">src/skills/base_skill.py</span>
+      <span class="file-tag new">src/skills/skill_registry.py</span>
+      <span class="file-tag new">src/skills/document/pdf_reader.py</span>
+      <span class="file-tag new">src/skills/document/docx_parser.py</span>
+      <span class="file-tag new">src/skills/document/ocr_processor.py</span>
+      <span class="file-tag new">src/skills/document/__init__.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 12 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 12</span> &nbsp;法律分析Skills开发</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>实现 <code>ClauseParserSkill</code> — 条款解析 (11类条款关键词库 + 正则提取)</li>
+      <li>实现 <code>RegulationCheckerSkill</code> — 法规检查 (8条内置规则 + 必备条款检查)</li>
+      <li>实现 <code>CaseRetrieverSkill</code> — 案例检索 (8个预置案例 + 多维度评分)</li>
+    </ul>
+    <h4>新增文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">src/skills/legal/clause_parser.py</span>
+      <span class="file-tag new">src/skills/legal/regulation_checker.py</span>
+      <span class="file-tag new">src/skills/legal/case_retriever.py</span>
+      <span class="file-tag new">src/skills/legal/__init__.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 13 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 13</span> &nbsp;风险管理Skills开发</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>实现 <code>RiskIdentifierSkill</code> — 风险识别 (14条风险规则库, 覆盖7大类别)</li>
+      <li>实现 <code>RiskScorerSkill</code> — 风险量化 (加权评分 + 风险矩阵 + 类别统计)</li>
+      <li>实现 <code>MitigationSuggesterSkill</code> — 缓解建议 (12套缓解模板 + 条款模板)</li>
+    </ul>
+    <h4>新增文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">src/skills/risk/risk_identifier.py</span>
+      <span class="file-tag new">src/skills/risk/risk_scorer.py</span>
+      <span class="file-tag new">src/skills/risk/mitigation_suggester.py</span>
+      <span class="file-tag new">src/skills/risk/__init__.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Day 14 -->
+<div class="day-card">
+  <div class="day-header">
+    <div><span class="day-num">Day 14</span> &nbsp;报告生成Skills开发</div>
+    <span class="status done">已完成</span>
+  </div>
+  <div class="day-body">
+    <h4>完成内容</h4>
+    <ul>
+      <li>实现 <code>ReportGeneratorSkill</code> — 综合报告生成 (执行摘要 + 风险分析 + 合规分析 + 条款分析 + 建议 + 结论 + 综合评分)</li>
+      <li>实现 <code>VisualizationSkill</code> — 可视化数据 (饼图/柱状图/雷达图/进度条/仪表盘/热力图, 6种图表)</li>
+      <li>实现 <code>ExportSkill</code> — 报告导出 (HTML精美排版 / Markdown / JSON)</li>
+      <li>AgentTools注册所有12个Skills</li>
+    </ul>
+    <h4>新增文件</h4>
+    <div class="file-list">
+      <span class="file-tag new">src/skills/report/report_generator.py</span>
+      <span class="file-tag new">src/skills/report/visualization.py</span>
+      <span class="file-tag new">src/skills/report/export.py</span>
+      <span class="file-tag new">src/skills/report/__init__.py</span>
+    </div>
+  </div>
+</div>
+
+<!-- Complete File Table -->
+<div class="file-table-section">
+  <h2>全部源文件清单</h2>
+  <table class="file-table">
+    <thead>
+      <tr><th>文件路径</th><th>模块</th><th>功能说明</th></tr>
+    </thead>
+    <tbody>
+      <!-- Agents -->
+      <tr><td class="path">src/agents/base_agent.py</td><td>Agent</td><td class="desc">抽象基类，定义 process() 接口、LLM集成、生命周期管理</td></tr>
+      <tr><td class="path">src/agents/communication.py</td><td>Agent</td><td class="desc">Agent间通信协议 (AgentMessage)</td></tr>
+      <tr><td class="path">src/agents/coordinator_agent.py</td><td>Agent</td><td class="desc">协调器: LLM动态任务分解、串行/并行调度、结果汇总</td></tr>
+      <tr><td class="path">src/agents/document_parser_agent.py</td><td>Agent</td><td class="desc">文档解析: LLM提取合同元数据、当事人、条款结构</td></tr>
+      <tr><td class="path">src/agents/clause_analysis_agent.py</td><td>Agent</td><td class="desc">条款分析: 歧义检测、完整性评估、权利义务分析</td></tr>
+      <tr><td class="path">src/agents/risk_assessment_agent.py</td><td>Agent</td><td class="desc">风险评估: 风险识别、量化评分、缓解建议生成</td></tr>
+      <tr><td class="path">src/agents/compliance_checker_agent.py</td><td>Agent</td><td class="desc">合规检查: LLM法规匹配、必备条款检查、合规评分</td></tr>
+      <tr><td class="path">src/agents/report_generator_agent.py</td><td>Agent</td><td class="desc">报告生成Agent: 汇总各Agent结果生成综合报告</td></tr>
+      <tr><td class="path">src/agents/langchain_agent.py</td><td>Agent</td><td class="desc">LangChain集成Agent封装</td></tr>
+      <tr><td class="path">src/agents/agent_tools.py</td><td>Agent</td><td class="desc">工具管理器: 注册12个Skills, 转换为LangChain工具</td></tr>
+      <tr><td class="path">src/agents/__init__.py</td><td>Agent</td><td class="desc">导出所有Agent类</td></tr>
+      <!-- Memory -->
+      <tr><td class="path">src/memory/shared_memory.py</td><td>Memory</td><td class="desc">共享记忆: 层存储(CONTEXT/ANALYSIS/DECISION)、线程安全、Observer通知</td></tr>
+      <tr><td class="path">src/memory/private_memory.py</td><td>Memory</td><td class="desc">私有记忆: 上下文窗口、压缩机制、缓存、持久化</td></tr>
+      <tr><td class="path">src/memory/memory_layer.py</td><td>Memory</td><td class="desc">记忆层定义和管理</td></tr>
+      <!-- MCP -->
+      <tr><td class="path">src/mcp/server.py</td><td>MCP</td><td class="desc">MCP Server基类: 工具注册、请求处理</td></tr>
+      <tr><td class="path">src/mcp/client.py</td><td>MCP</td><td class="desc">MCP Client: 与MCP Server通信</td></tr>
+      <tr><td class="path">src/mcp/protocol.py</td><td>MCP</td><td class="desc">MCP协议定义、消息格式</td></tr>
+      <!-- Skills: Document -->
+      <tr><td class="path">src/skills/base_skill.py</td><td>Skill</td><td class="desc">Skill抽象基类: skill_id, name, description, execute()</td></tr>
+      <tr><td class="path">src/skills/skill_registry.py</td><td>Skill</td><td class="desc">Skill注册表: 注册、查询、执行管理</td></tr>
+      <tr><td class="path">src/skills/document/pdf_reader.py</td><td>Skill</td><td class="desc">PDF读取: PyPDF2/pdfplumber文本提取</td></tr>
+      <tr><td class="path">src/skills/document/docx_parser.py</td><td>Skill</td><td class="desc">Word解析: python-docx段落/表格提取</td></tr>
+      <tr><td class="path">src/skills/document/ocr_processor.py</td><td>Skill</td><td class="desc">OCR处理: Pillow图像处理 + 文字识别</td></tr>
+      <!-- Skills: Legal -->
+      <tr><td class="path">src/skills/legal/clause_parser.py</td><td>Skill</td><td class="desc">条款解析: 11类关键词库 + 正则提取 + 关键信息识别</td></tr>
+      <tr><td class="path">src/skills/legal/regulation_checker.py</td><td>Skill</td><td class="desc">法规检查: 8条内置规则 + 必备条款检查</td></tr>
+      <tr><td class="path">src/skills/legal/case_retriever.py</td><td>Skill</td><td class="desc">案例检索: 8个预置案例 + 多维度评分搜索</td></tr>
+      <!-- Skills: Risk -->
+      <tr><td class="path">src/skills/risk/risk_identifier.py</td><td>Skill</td><td class="desc">风险识别: 14条规则, 覆盖7大风险类别</td></tr>
+      <tr><td class="path">src/skills/risk/risk_scorer.py</td><td>Skill</td><td class="desc">风险量化: 加权评分 + 风险矩阵 + 类别统计</td></tr>
+      <tr><td class="path">src/skills/risk/mitigation_suggester.py</td><td>Skill</td><td class="desc">缓解建议: 12套模板 + 条款修改模板 + 优先级排序</td></tr>
+      <!-- Skills: Report -->
+      <tr><td class="path">src/skills/report/report_generator.py</td><td>Skill</td><td class="desc">综合报告: 摘要+风险+合规+条款+建议+结论+评分</td></tr>
+      <tr><td class="path">src/skills/report/visualization.py</td><td>Skill</td><td class="desc">可视化: 饼图/柱状图/雷达图/进度条/仪表盘/热力图</td></tr>
+      <tr><td class="path">src/skills/report/export.py</td><td>Skill</td><td class="desc">导出: HTML精美排版 / Markdown / JSON格式</td></tr>
+      <!-- API -->
+      <tr><td class="path">src/api/main.py</td><td>API</td><td class="desc">FastAPI应用入口, 路由注册</td></tr>
+      <tr><td class="path">src/api/routes.py</td><td>API</td><td class="desc">API路由: /review, /upload等接口</td></tr>
+      <tr><td class="path">src/api/task_manager.py</td><td>API</td><td class="desc">任务管理: 注册6个Agent, 协调执行流程</td></tr>
+      <tr><td class="path">src/api/document_parser.py</td><td>API</td><td class="desc">文档解析API辅助模块</td></tr>
+      <!-- Utils -->
+      <tr><td class="path">src/utils/llm_factory.py</td><td>Util</td><td class="desc">LLM工厂: 支持Anthropic/OpenAI/Ollama多提供商</td></tr>
+      <tr><td class="path">src/utils/logger.py</td><td>Util</td><td class="desc">日志配置模块</td></tr>
+      <tr><td class="path">src/utils/validators.py</td><td>Util</td><td class="desc">输入验证工具</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Stats Summary -->
+<div class="arch-section">
+  <h2>数据统计</h2>
+  <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap: 16px;">
+    <div class="overview-card blue">
+      <div class="number">50+</div>
+      <div class="label">源文件总数</div>
+    </div>
+    <div class="overview-card green">
+      <div class="number">12</div>
+      <div class="label">Skills能力模块</div>
+    </div>
+    <div class="overview-card orange">
+      <div class="number">14</div>
+      <div class="label">已完成天数</div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  智能合同审查系统 — 开发进度报告 | 生成时间: 2026-05-26
+</div>
+
+</div>
+</body>
+</html>

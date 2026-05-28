@@ -27,12 +27,32 @@
 
 ---
 
-## 2. 系统架构
+## 2. 系统架构（实际实现）
+
+### 2.1 整体架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                        合同审查协调器 (Coordinator)                       │
-│                              LangGraph Agent                             │
+│                          前端UI (对话界面)                               │
+│                    文件上传 + 多轮对话 + 结果展示                         │
+└─────────────────────────────┬───────────────────────────────────────────┘
+                              │ HTTP API
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        FastAPI 后端 (main.py)                           │
+│                    /api/v1/review  /api/v1/upload                       │
+└─────────────────────────────┬───────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     TaskManager (任务管理器)                             │
+│              意图识别 → Agent路由 → 执行 → 结果汇总                      │
+└─────────────────────────────┬───────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    CoordinatorAgent (协调器)                             │
+│              LLM智能规划 → 动态执行计划 → 并行/串行调度                   │
 └─────────────┬───────────────────────────────────────────────────────────┘
               │
               │  任务分配 & 结果汇总
@@ -40,116 +60,156 @@
     ┌─────────┴─────────┬─────────────────────┬─────────────────────┐
     ▼                   ▼                     ▼                     ▼
 ┌─────────────┐   ┌─────────────┐       ┌─────────────┐       ┌─────────────┐
-│  合同解析    │   │  条款分析    │       │  风险评估    │       │  合规检查    │
+│  文档解析    │   │  条款分析    │       │  风险评估    │       │  合规检查    │
 │  Agent      │   │  Agent      │       │  Agent      │       │  Agent      │
-│ (LangChain) │   │ (LangChain) │       │ (LangChain) │       │ (LangChain) │
+│ (LLM驱动)  │   │ (LLM驱动)   │       │ (LLM驱动)   │       │ (LLM驱动)   │
 └─────────────┘   └─────────────┘       └─────────────┘       └─────────────┘
-    │                   │                     │                     │
-    │                   │                     │                     │
-    └───────────────────┴──────────┬──────────┴─────────────────────┘
+        │               │                     │                     │
+        │               │                     │                     │
+        └───────────────┴──────────┬──────────┴─────────────────────┘
                                    │
                                    ▼
                     ┌─────────────────────────────┐
-                    │      共享记忆存储            │
-                    │  (LangChain Memory +       │
-                    │   Redis/PostgreSQL)         │
-                    │  - 合同上下文               │
-                    │  - 分析结果                 │
-                    │  - 决策历史                 │
+                    │      报告生成Agent           │
+                    │      (汇总所有结果)          │
                     └─────────────────────────────┘
-                                   │
-                    ┌──────────────┴──────────────┐
-                    │                             │
-                    ▼                             ▼
-        ┌───────────────────┐         ┌───────────────────┐
-        │  LangChain Tools: │         │  LangChain Tools: │
-        │  - PDF工具        │         │  - 法规检索工具    │
-        │  - OCR工具        │         │  - 案例检索工具    │
-        │  - 元数据工具     │         │  - 风险评估工具    │
-        └───────────────────┘         └───────────────────┘
+```
+
+### 2.2 技术栈（实际使用）
+
+| 组件 | 技术 | 说明 |
+|------|------|------|
+| LLM | MIMO模型 (ChatAnthropic/OpenAI) | 通过langchain封装 |
+| Agent框架 | BaseAgent (自定义) | 继承ABC，统一process()接口 |
+| Agent编排 | CoordinatorAgent (LLM动态规划) | 根据任务自动生成执行计划 |
+| 记忆系统 | SharedMemoryManager + AgentPrivateMemory | 分层存储 + 上下文压缩 |
+| 工具系统 | LangChain Tools + Skills | 4个LLM工具 + 3个文档处理Skills |
+| API | FastAPI | RESTful接口 + 文件上传 |
+| 消息队列 | RabbitMQ (可选) | 异步任务处理 |
+
+### 2.3 目录结构
+
+```
+contract-review-system/
+├── src/
+│   ├── agents/                    # Agent模块
+│   │   ├── base_agent.py          # Agent基类 (ABC)
+│   │   ├── coordinator_agent.py   # 协调器 (LLM动态规划)
+│   │   ├── document_parser_agent.py  # 文档解析Agent
+│   │   ├── clause_analysis_agent.py  # 条款分析Agent
+│   │   ├── risk_assessment_agent.py  # 风险评估Agent
+│   │   ├── compliance_checker_agent.py  # 合规检查Agent
+│   │   ├── report_generator_agent.py    # 报告生成Agent
+│   │   ├── communication.py       # Agent间通信
+│   │   ├── langchain_agent.py     # LangChain包装器
+│   │   └── agent_tools.py         # 工具集成
+│   ├── memory/                    # 记忆系统
+│   │   ├── shared_memory.py       # 共享记忆管理器
+│   │   ├── private_memory.py      # Agent私有记忆
+│   │   └── memory_layer.py        # 记忆层次定义
+│   ├── mcp/                       # MCP Server
+│   │   ├── server.py              # MCP服务端
+│   │   ├── client.py              # MCP客户端
+│   │   └── protocol.py            # MCP协议定义
+│   ├── skills/                    # Skills模块
+│   │   ├── base_skill.py          # Skill基类
+│   │   ├── skill_registry.py      # Skills注册器
+│   │   └── document/              # 文档处理Skills
+│   │       ├── pdf_reader.py
+│   │       ├── docx_parser.py
+│   │       └── ocr_processor.py
+│   ├── tools/                     # LangChain工具
+│   │   └── langchain_tools.py     # 4个合同审查工具
+│   ├── api/                       # API模块
+│   │   ├── main.py                # FastAPI入口
+│   │   ├── routes.py              # API路由
+│   │   └── task_manager.py        # 任务管理器
+│   └── utils/                     # 工具函数
+│       ├── llm_factory.py         # LLM工厂
+│       ├── logger.py              # 日志
+│       └── validators.py          # 验证器
+├── config/                        # 配置
+│   └── settings.py
+├── daily_plan.md                  # 开发计划
+└── plan_langchain.md              # 本文档
 ```
 
 ---
 
-## 3. Agent角色定义
+## 3. Agent角色定义（实际实现）
 
-### 3.1 协调器Agent (Coordinator Agent)
-**职责**: 任务调度、结果汇总、工作流控制
-
-**实现方式**: LangGraph StateGraph
-
+### 3.1 BaseAgent 基类
 ```python
-from langgraph.graph import StateGraph, END
-from typing import TypedDict, List, Dict, Any
+# src/agents/base_agent.py
+class BaseAgent(ABC):
+    def __init__(self, agent_id, name, role, llm=None, description=""):
+        self.agent_id = agent_id
+        self.name = name
+        self.role = role
+        self.llm = llm or get_llm()
+        self.private_memory: Dict[str, Any] = {}
 
-class ReviewState(TypedDict):
-    contract_id: str
-    document: str
-    metadata: Dict
-    clauses: List[Dict]
-    analysis_results: Dict
-    risk_assessment: Dict
-    compliance_report: Dict
-    final_report: str
-
-class CoordinatorAgent:
-    def __init__(self, llm):
-        self.llm = llm
-        self.workflow = self._build_workflow()
-    
-    def _build_workflow(self):
-        # 创建状态图
-        workflow = StateGraph(ReviewState)
-        
-        # 添加节点
-        workflow.add_node("parse_document", self.parse_document)
-        workflow.add_node("analyze_clauses", self.analyze_clauses)
-        workflow.add_node("assess_risks", self.assess_risks)
-        workflow.add_node("check_compliance", self.check_compliance)
-        workflow.add_node("aggregate_results", self.aggregate_results)
-        
-        # 添加边
-        workflow.set_entry_point("parse_document")
-        workflow.add_edge("parse_document", "analyze_clauses")
-        workflow.add_edge("parse_document", "assess_risks")
-        workflow.add_edge("parse_document", "check_compliance")
-        workflow.add_conditional_edges(
-            "analyze_clauses",
-            self.should_continue,
-            {
-                "continue": "assess_risks",
-                "end": END
-            }
-        )
-        workflow.add_edge("assess_risks", "aggregate_results")
-        workflow.add_edge("check_compliance", "aggregate_results")
-        workflow.add_edge("aggregate_results", END)
-        
-        return workflow.compile()
-    
-    async def review(self, contract: str) -> str:
-        """执行合同审查"""
-        initial_state = {
-            "document": contract,
-            "metadata": {},
-            "clauses": [],
-            "analysis_results": {},
-            "risk_assessment": {},
-            "compliance_report": {},
-            "final_report": ""
-        }
-        
-        result = await self.workflow.ainvoke(initial_state)
-        return result["final_report"]
+    @abstractmethod
+    async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """处理任务（抽象方法）"""
+        pass
 ```
 
-**Skills**:
-- `task-decomposer`: 将复杂审查任务分解为子任务
-- `result-aggregator`: 汇总多个Agent的审查结果
-- `conflict-resolver`: 解决Agent间的审查意见冲突
+### 3.2 协调器Agent (CoordinatorAgent)
+**职责**: 智能任务调度、LLM动态规划、结果汇总
 
-### 3.2 合同解析Agent (Document Parser Agent)
-**职责**: 文档预处理、结构化提取
+```python
+# src/agents/coordinator_agent.py
+class CoordinatorAgent(BaseAgent):
+    async def process(self, task):
+        # 1. LLM智能规划执行计划
+        execution_plan = await self._plan_execution(task)
+        # 2. 并行/串行混合执行
+        results = await self._execute_plan(execution_plan, task, contract_text)
+        # 3. 汇总所有结果
+        final_result = self._aggregate_results(results, task)
+        return final_result
+```
+
+默认执行计划（5个步骤）：
+```
+parse_document → [analyze_clauses, assess_risks, compliance_check] → generate_report
+                   (并行执行3个Agent)                    (串行汇总)
+```
+
+### 3.3 文档解析Agent (DocumentParserAgent)
+**职责**: 合同文档预处理、结构化信息提取
+
+- LLM单次调用提取所有信息（基本信息、条款、日期、金额、术语）
+- 长文本Map-Reduce分块处理
+- JSON容错解析 + 正则回退
+
+### 3.4 条款分析Agent (ClauseAnalysisAgent)
+**职责**: 条款完整性、歧义检测、权利义务平衡分析
+
+- 完整性评分（必备条款检查）
+- 歧义表述识别
+- 权利/义务数量统计与平衡性判断
+
+### 3.5 风险评估Agent (RiskAssessmentAgent)
+**职责**: 风险识别、量化、缓解建议
+
+- LLM风险识别（责任、付款、IP、终止、争议等类别）
+- `quantify_risk()`: 加权风险评分（severity × category权重）
+- `suggest_mitigation()`: 按优先级生成缓解计划
+
+### 3.6 合规检查Agent (ComplianceCheckerAgent)
+**职责**: 法规合规检查、必备条款验证
+
+- 7类合同必备条款库
+- LLM合规分析 + 规则回退
+- 自动计算合规分数
+
+### 3.7 报告生成Agent (ReportGeneratorAgent)
+**职责**: 汇总所有分析结果，生成专业审查报告
+
+- 执行摘要 + 风险分类 + 建议列表
+- 结论（建议签署/修改后签署/不建议签署）
 
 **实现方式**: LangChain Agent + Tools
 
@@ -761,331 +821,179 @@ agent = create_agent_with_tools(llm, all_tools)
 
 ---
 
-## 6. 工作流程实现
+## 6. 工作流程实现（实际）
 
 ### 6.1 完整审查流程
 
 ```python
-from langgraph.graph import StateGraph, END
-from typing import TypedDict, List, Dict, Any
-import asyncio
+# src/api/task_manager.py
+class TaskManager:
+    def __init__(self):
+        self._coordinator = CoordinatorAgent()
+        # 注册所有Agent
+        self._coordinator.register_agent(DocumentParserAgent())
+        self._coordinator.register_agent(ClauseAnalysisAgent())
+        self._coordinator.register_agent(RiskAssessmentAgent())
+        self._coordinator.register_agent(ComplianceCheckerAgent())
+        self._coordinator.register_agent(ReportGeneratorAgent())
 
-class ReviewState(TypedDict):
-    contract_id: str
-    document: str
-    metadata: Dict
-    clauses: List[Dict]
-    analysis_results: Dict
-    risk_assessment: Dict
-    compliance_report: Dict
-    final_report: str
-
-class ContractReviewWorkflow:
-    def __init__(self, llm):
-        self.llm = llm
-        self.shared_memory = None
-        self.workflow = self._build_workflow()
-    
-    def _build_workflow(self):
-        """构建工作流"""
-        workflow = StateGraph(ReviewState)
-        
-        # 添加节点
-        workflow.add_node("initialize", self.initialize)
-        workflow.add_node("parse_document", self.parse_document)
-        workflow.add_node("analyze_clauses", self.analyze_clauses)
-        workflow.add_node("assess_risks", self.assess_risks)
-        workflow.add_node("check_compliance", self.check_compliance)
-        workflow.add_node("aggregate_results", self.aggregate_results)
-        workflow.add_node("generate_report", self.generate_report)
-        
-        # 设置工作流
-        workflow.set_entry_point("initialize")
-        workflow.add_edge("initialize", "parse_document")
-        
-        # 并行执行分析任务
-        workflow.add_conditional_edges(
-            "parse_document",
-            self.route_after_parse,
-            {
-                "parallel": ["analyze_clauses", "assess_risks", "check_compliance"]
-            }
-        )
-        
-        # 汇总结果
-        workflow.add_edge("analyze_clauses", "aggregate_results")
-        workflow.add_edge("assess_risks", "aggregate_results")
-        workflow.add_edge("check_compliance", "aggregate_results")
-        
-        # 生成报告
-        workflow.add_edge("aggregate_results", "generate_report")
-        workflow.add_edge("generate_report", END)
-        
-        return workflow.compile()
-    
-    async def initialize(self, state: ReviewState) -> ReviewState:
-        """初始化"""
-        self.shared_memory = SharedMemoryManager(state["contract_id"])
-        return state
-    
-    async def parse_document(self, state: ReviewState) -> ReviewState:
-        """解析文档"""
-        parser_agent = DocumentParserAgent(self.llm)
-        result = await parser_agent.parse(state["document"])
-        
-        # 写入共享记忆
-        self.shared_memory.write_shared(
-            "parser", "document_structure", result, MemoryLayer.CONTEXT
-        )
-        
-        state["metadata"] = result["metadata"]
-        state["clauses"] = result["clauses"]
-        return state
-    
-    async def analyze_clauses(self, state: ReviewState) -> ReviewState:
-        """分析条款"""
-        analyzer_agent = ClauseAnalysisAgent(self.llm)
-        
-        # 从共享记忆读取
-        clauses = self.shared_memory.read_shared(
-            "clause_analyzer", "clauses", MemoryLayer.CONTEXT
-        )
-        
-        result = await analyzer_agent.analyze(clauses)
-        
-        # 写入共享记忆
-        self.shared_memory.write_shared(
-            "clause_analyzer", "analysis_results", result, MemoryLayer.ANALYSIS
-        )
-        
-        state["analysis_results"] = result
-        return state
-    
-    async def assess_risks(self, state: ReviewState) -> ReviewState:
-        """评估风险"""
-        risk_agent = RiskAssessmentAgent(self.llm)
-        
-        # 从共享记忆读取
-        clauses = self.shared_memory.read_shared(
-            "risk_assessor", "clauses", MemoryLayer.CONTEXT
-        )
-        
-        result = await risk_agent.assess(clauses, state["metadata"])
-        
-        # 写入共享记忆
-        self.shared_memory.write_shared(
-            "risk_assessor", "risk_assessment", result, MemoryLayer.ANALYSIS
-        )
-        
-        state["risk_assessment"] = result
-        return state
-    
-    async def check_compliance(self, state: ReviewState) -> ReviewState:
-        """检查合规"""
-        compliance_agent = ComplianceCheckerAgent(self.llm)
-        
-        # 从共享记忆读取
-        clauses = self.shared_memory.read_shared(
-            "compliance_checker", "clauses", MemoryLayer.CONTEXT
-        )
-        
-        result = await compliance_agent.check(
-            clauses, state["metadata"]["type"]
-        )
-        
-        # 写入共享记忆
-        self.shared_memory.write_shared(
-            "compliance_checker", "compliance_report", result, MemoryLayer.ANALYSIS
-        )
-        
-        state["compliance_report"] = result
-        return state
-    
-    async def aggregate_results(self, state: ReviewState) -> ReviewState:
-        """汇总结果"""
-        # 从共享记忆读取所有结果
-        analysis = self.shared_memory.read_shared(
-            "coordinator", "analysis_results", MemoryLayer.ANALYSIS
-        )
-        risk = self.shared_memory.read_shared(
-            "coordinator", "risk_assessment", MemoryLayer.ANALYSIS
-        )
-        compliance = self.shared_memory.read_shared(
-            "coordinator", "compliance_report", MemoryLayer.ANALYSIS
-        )
-        
-        # 汇总
-        aggregated = {
-            "analysis": analysis,
-            "risk_assessment": risk,
-            "compliance": compliance
-        }
-        
-        state["final_report"] = aggregated
-        return state
-    
-    async def generate_report(self, state: ReviewState) -> ReviewState:
-        """生成报告"""
-        report_generator = ReportGenerator(self.llm)
-        report = await report_generator.generate(state["final_report"])
-        
-        state["final_report"] = report
-        return state
-    
-    async def review(self, contract_id: str, document: str) -> str:
-        """执行合同审查"""
-        initial_state = {
-            "contract_id": contract_id,
-            "document": document,
-            "metadata": {},
-            "clauses": [],
-            "analysis_results": {},
-            "risk_assessment": {},
-            "compliance_report": {},
-            "final_report": ""
-        }
-        
-        result = await self.workflow.ainvoke(initial_state)
-        return result["final_report"]
+    async def process_sync(self, contract_text, contract_type, review_focus):
+        return await self._coordinator.process({
+            "contract_text": contract_text,
+            "contract_type": contract_type,
+            "review_focus": review_focus,
+        })
 ```
 
-### 6.2 并行处理优化
+### 6.2 CoordinatorAgent 智能调度
 
 ```python
-import asyncio
+# src/agents/coordinator_agent.py
+class CoordinatorAgent(BaseAgent):
+    async def _plan_execution(self, task):
+        """LLM动态规划执行计划"""
+        # 根据任务需求，LLM决定调用哪些Agent
+        # 输出：[{task_name, agent_role, depends_on, parallel}]
+        pass
 
-class ParallelReviewCoordinator:
-    """并行审查协调器"""
-    
-    def __init__(self, llm):
-        self.llm = llm
-    
-    async def parallel_review(self, state: ReviewState) -> ReviewState:
-        """并行执行分析任务"""
-        
-        # 创建并行任务
-        tasks = [
-            self.analyze_clauses(state),
-            self.assess_risks(state),
-            self.check_compliance(state)
-        ]
-        
-        # 并行执行
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # 处理结果
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                print(f"Task {i} failed: {result}")
-            else:
-                # 更新状态
-                pass
-        
-        return state
+    async def _execute_plan(self, plan, task, contract_text):
+        """支持并行的DAG执行"""
+        import asyncio
+        results = {}
+        completed = set()
+        while len(completed) < len(plan):
+            # 找出可执行的任务（依赖已满足）
+            ready = [t for t in plan if t["depends_on"] ⊆ completed]
+            # 并行执行
+            task_results = await asyncio.gather(*[
+                self._execute_single(name, agent, input)
+                for name, agent, input in ready
+            ])
+            # 更新completed
+        return results
+```
+
+### 6.3 默认执行计划
+
+```
+Step 1: parse_document (串行，必须先解析)
+    ↓
+Step 2: [analyze_clauses, assess_risks, compliance_check] (并行)
+    ↓
+Step 3: generate_report (串行，汇总所有结果)
 ```
 
 ---
 
-## 7. 实现计划 (30天)
+## 7. 实现计划 (25天)
 
-### 第一周: 基础架构搭建
+> **当前进度**: Day 1-14 ✅ 已完成 | Day 15-25 待开发
+> **最后更新**: 2026-05-28
 
-**Day 1 (周一): 项目初始化**
-- [ ] 创建项目目录结构
-- [ ] 初始化Python虚拟环境
-- [ ] 安装LangChain及相关依赖
-- [ ] 配置开发工具
-- [ ] 创建README文档
+### 第一周: 基础架构搭建 ✅
 
-**Day 2 (周二): LangChain基础配置**
-- [ ] 配置MIMO模型连接
-- [ ] 测试LLM调用
-- [ ] 实现基础Agent框架
-- [ ] 编写配置管理代码
+**Day 1 (周一): 项目初始化** ✅
+- [x] 创建项目目录结构
+- [x] 初始化Python虚拟环境
+- [x] 安装LangChain及相关依赖
+- [x] 配置开发工具
+- [x] 创建README文档
 
-**Day 3 (周三): 共享记忆系统实现**
-- [ ] 实现SharedMemoryManager类
-- [ ] 集成Redis存储
-- [ ] 集成向量数据库
-- [ ] 实现记忆通知机制
+**Day 2 (周二): LangChain基础配置** ✅
+- [x] 配置MIMO模型连接
+- [x] 测试LLM调用
+- [x] 实现基础Agent框架 (BaseAgent)
+- [x] 编写配置管理代码 (Settings)
 
-**Day 4 (周四): Agent私有记忆实现**
-- [ ] 实现ConversationBufferMemory封装
-- [ ] 实现ConversationSummaryMemory封装
-- [ ] 实现上下文压缩机制
-- [ ] 编写记忆系统测试
+**Day 3 (周三): 共享记忆系统实现** ✅
+- [x] 实现SharedMemoryManager类
+- [x] 集成Redis存储
+- [x] 集成向量数据库
+- [x] 实现记忆通知机制
 
-**Day 5 (周五): LangChain Tools基础**
-- [ ] 研究LangChain Tools API
-- [ ] 实现BaseTool基类
-- [ ] 创建工具注册机制
-- [ ] 编写工具测试用例
+**Day 4 (周四): Agent私有记忆实现** ✅
+- [x] 实现AgentPrivateMemory
+- [x] 实现上下文压缩机制
+- [x] 实现记忆层次定义 (MemoryLayer)
 
-### 第二周: 核心Agent实现
+**Day 5 (周五): MCP Server基础架构** ✅
+- [x] 实现MCP Server (MCPServer)
+- [x] 实现MCP Client (MCPClient)
+- [x] 实现MCP协议定义 (Protocol)
+- [x] 实现Agent间通信 (MessageBus)
 
-**Day 6 (周一): 协调器Agent实现**
-- [ ] 实现LangGraph StateGraph
-- [ ] 定义ReviewState状态
-- [ ] 实现任务分配逻辑
-- [ ] 实现结果汇总逻辑
+### 第二周: 核心Agent实现 ✅
 
-**Day 7 (周二): 合同解析Agent实现**
-- [ ] 实现DocumentParserAgent
-- [ ] 创建PDF读取工具
-- [ ] 创建元数据提取工具
-- [ ] 创建条款识别工具
+**Day 6 (周一): 协调器Agent实现** ✅
+- [x] 实现CoordinatorAgent (LLM动态规划)
+- [x] 实现任务分配逻辑
+- [x] 实现并行/串行混合执行
+- [x] 实现结果汇总逻辑
 
-**Day 8 (周三): 条款分析Agent实现**
-- [ ] 实现ClauseAnalysisAgent
-- [ ] 创建条款分析工具
-- [ ] 创建歧义检测工具
-- [ ] 创建完整性检查工具
+**Day 7 (周二): 合同解析Agent实现** ✅
+- [x] 实现DocumentParserAgent (LLM驱动)
+- [x] 实现Map-Reduce长文本处理
+- [x] 实现JSON容错解析
+- [x] 实现数据标准化
 
-**Day 9 (周四): 风险评估Agent实现**
-- [ ] 实现RiskAssessmentAgent
-- [ ] 创建风险识别工具
-- [ ] 创建风险量化工具
-- [ ] 创建缓解建议工具
+**Day 8 (周三): 条款分析Agent实现** ✅
+- [x] 实现ClauseAnalysisAgent (LLM驱动)
+- [x] 实现完整性评分
+- [x] 实现歧义检测
+- [x] 实现正则回退
 
-**Day 10 (周五): 合规检查Agent实现**
-- [ ] 实现ComplianceCheckerAgent
-- [ ] 创建法规检索工具
-- [ ] 创建合规检查工具
-- [ ] 创建必备条款验证工具
+**Day 9 (周四): 风险评估Agent实现** ✅
+- [x] 实现RiskAssessmentAgent (LLM驱动)
+- [x] 实现风险量化 (quantify_risk)
+- [x] 实现缓解建议 (suggest_mitigation)
+- [x] 实现正则回退
 
-### 第三周: Tools和集成
+**Day 10 (周五): 合规检查Agent实现** ✅
+- [x] 实现ComplianceCheckerAgent (LLM驱动)
+- [x] 实现7类合同必备条款库
+- [x] 实现规则回退检查
+- [x] 实现合规分数自动计算
 
-**Day 11 (周一): 文档处理Tools**
-- [ ] 实现PDFReaderTool
-- [ ] 实现OCRProcessorTool
-- [ ] 实现DocxParserTool
-- [ ] 测试文档处理工具
+### 第三周: Skills和集成 ✅
 
-**Day 12 (周二): 法律分析Tools**
-- [ ] 实现RegulationSearcherTool
-- [ ] 实现CaseRetrieverTool
-- [ ] 实现LegalOntologyTool
-- [ ] 测试法律分析工具
+**Day 11 (周一): 文档处理Skills** ✅
+- [x] 实现PDFReaderSkill
+- [x] 实现DocxParserSkill
+- [x] 实现OCRProcessorSkill
+- [x] 测试文档处理Skills
 
-**Day 13 (周三): 风险管理Tools**
-- [ ] 实现RiskIdentifierTool
-- [ ] 实现RiskScorerTool
-- [ ] 实现MitigationSuggesterTool
-- [ ] 测试风险管理工具
+**Day 12 (周二): 法律分析Skills** ✅
+- [x] 实现ClauseParserSkill
+- [x] 实现RegulationCheckerSkill
+- [x] 实现CaseRetrieverSkill
+- [x] 测试法律分析Skills
 
-**Day 14 (周四): 报告生成Tools**
-- [ ] 实现ReportGeneratorTool
-- [ ] 实现VisualizationTool
-- [ ] 实现ExportTool
-- [ ] 测试报告生成工具
+**Day 13 (周三): 风险管理Skills** ✅
+- [x] 实现RiskIdentifierSkill
+- [x] 实现RiskScorerSkill
+- [x] 实现MitigationSuggesterSkill
+- [x] 测试风险管理Skills
+
+**Day 14 (周四): 报告生成Skills** ✅
+- [x] 实现ReportGeneratorSkill
+- [x] 实现VisualizationSkill
+- [x] 实现ExportSkill
+- [x] 测试报告生成Skills
+
+**额外完成: API层和任务管理** ✅
+- [x] 实现FastAPI应用入口 (main.py)
+- [x] 实现API路由 (routes.py): /review, /upload, /tasks
+- [x] 实现TaskManager (RabbitMQ + 文件持久化)
+- [x] 实现DocumentParser (文件上传解析)
+- [x] 实现SkillRegistry和AgentTools集成
+
+### 第四周: 工具集成测试 🔄
 
 **Day 15 (周五): 工具集成测试**
 - [ ] 测试所有工具集成
 - [ ] 修复发现的问题
 - [ ] 优化工具性能
 - [ ] 编写工具使用文档
-
-### 第四周: 集成测试与优化
 
 **Day 16 (周一): Agent协作测试**
 - [ ] 设计端到端测试用例
@@ -1117,19 +1025,39 @@ class ParallelReviewCoordinator:
 - [ ] 实现重试机制
 - [ ] 编写错误处理文档
 
-### 第五周前两天: 优化与文档
+### 第五周: UI界面与多轮对话 🔄
 
-**Day 21 (周一): 用户界面开发**
-- [ ] 设计简单CLI界面
-- [ ] 实现合同上传功能
-- [ ] 实现审查结果展示
-- [ ] 测试用户界面
+**Day 21 (周一): 前端UI框架搭建**
+- [ ] 选择前端技术栈（Streamlit / Gradio / React）
+- [ ] 创建项目前端目录结构
+- [ ] 实现基础对话界面（消息列表 + 输入框）
+- [ ] 实现文件上传组件（支持PDF/DOCX/TXT）
+- [ ] 对接后端API接口
+- [ ] 实现消息发送和接收的基本流程
 
-**Day 22 (周二): 文档编写**
-- [ ] 编写API文档
-- [ ] 编写用户使用手册
-- [ ] 编写开发者文档
-- [ ] 整理项目文档
+**Day 22 (周二): 意图识别与Agent路由**
+- [ ] 设计意图识别逻辑（关键词/LLM分类）
+- [ ] 在Coordinator中实现意图路由方法
+- [ ] 实现对话上下文管理
+- [ ] 测试各种指令的路由准确性
+
+**Day 23 (周三): 多轮对话实现**
+- [ ] 实现对话历史存储
+- [ ] 实现上下文注入（历史对话 + 上传文件）
+- [ ] 支持追问场景（解析→风险→修改建议→报告）
+- [ ] 测试多轮对话的上下文连贯性
+
+**Day 24 (周四): 结果展示与交互优化**
+- [ ] 设计结构化结果展示模板
+- [ ] 实现加载动画和进度显示
+- [ ] 前端结果卡片、进度条、状态提示
+- [ ] 测试端到端流程
+
+**Day 25 (周五): 联调与测试**
+- [ ] 前后端联调测试
+- [ ] 修复联调中的bug
+- [ ] 测试边界情况（空文件、超大文件）
+- [ ] 编写使用说明文档
 
 ---
 
@@ -1189,14 +1117,169 @@ LOG_LEVEL=INFO
 
 ---
 
-## 9. 总结
+## 9. UI界面与多轮对话设计
 
-本方案使用LangChain框架实现智能合同审查系统，主要优势：
+### 9.1 整体交互流程
 
-1. **模型灵活性**: 支持MIMO等非Claude模型
-2. **丰富的Memory模块**: 内置多种记忆类型，无需自定义
-3. **强大的Tool系统**: 标准化的工具定义和调用
-4. **LangGraph工作流**: 支持复杂的多Agent编排
-5. **社区生态**: 丰富的插件和示例
+```
+用户界面
+┌──────────────────────────────────────────────────────────────┐
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │                    对话消息列表                         │  │
+│  │  ┌──────────────────────────────────────────────────┐  │  │
+│  │  │ 🤖 你好！我是智能合同审查助手。                    │  │  │
+│  │  │ 请上传合同文件或告诉我你需要什么帮助。              │  │  │
+│  │  └──────────────────────────────────────────────────┘  │  │
+│  │                                                        │  │
+│  │  ┌──────────────────────────────────────────────────┐  │  │
+│  │  │ 👤 [上传] 劳动合同.pdf                            │  │  │
+│  │  └──────────────────────────────────────────────────┘  │  │
+│  │                                                        │  │
+│  │  ┌──────────────────────────────────────────────────┐  │  │
+│  │  │ 🤖 📄 文件已解析完成                              │  │  │
+│  │  │    合同类型: 劳动合同                              │  │  │
+│  │  │    当事人: 张三 / XX科技有限公司                    │  │  │
+│  │  │    条款数: 12条                                   │  │  │
+│  │  │                                                   │  │  │
+│  │  │    你想让我做什么？                                │  │  │
+│  │  │    • 分析条款完整性                                │  │  │
+│  │  │    • 评估风险                                      │  │  │
+│  │  │    • 合规检查                                      │  │  │
+│  │  │    • 生成完整报告                                  │  │  │
+│  │  └──────────────────────────────────────────────────┘  │  │
+│  │                                                        │  │
+│  │  ┌──────────────────────────────────────────────────┐  │  │
+│  │  │ 👤 评估一下风险                                   │  │  │
+│  │  └──────────────────────────────────────────────────┘  │  │
+│  │                                                        │  │
+│  │  ┌──────────────────────────────────────────────────┐  │  │
+│  │  │ 🤖 ⚠️ 风险评估完成                                │  │  │
+│  │  │    整体风险等级: 中等                              │  │  │
+│  │  │    ┌─────────────────────────────────────────┐   │  │  │
+│  │  │    │ 🔴 高风险: 2项                           │   │  │  │
+│  │  │    │   • 无限责任条款                          │   │  │  │
+│  │  │    │   • 自动续约无限制                        │   │  │  │
+│  │  │    │ 🟡 中风险: 3项                           │   │  │  │
+│  │  │    │   • 违约金比例偏高                        │   │  │  │
+│  │  │    │   • 保密期限过长                          │   │  │  │
+│  │  │    │   • 争议解决条款不明确                    │   │  │  │
+│  │  │    └─────────────────────────────────────────┘   │  │  │
+│  │  │                                                   │  │  │
+│  │  │    需要我生成修改建议吗？                         │  │  │
+│  │  └──────────────────────────────────────────────────┘  │  │
+│  └────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────────┐│
+│  │ 📎  [文件上传]     请输入指令...           [发送]        ││
+│  └──────────────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────┘
+```
 
-通过30天的开发计划，可以完成一个功能完整、性能良好的智能合同审查系统。
+### 9.2 意图识别与Agent路由
+
+用户输入通过LLM进行意图分类，路由到对应的Agent：
+
+```python
+# 意图识别规则
+INTENT_ROUTES = {
+    # 单Agent指令
+    "解析": ["document_parser"],           # "解析这个文件"
+    "分析条款": ["clause_analyst"],         # "分析条款"
+    "风险": ["risk_assessor"],             # "评估风险"、"有什么风险"
+    "合规": ["compliance_checker"],        # "合规检查"、"合法吗"
+    "报告": ["all"],                        # "生成报告"、"完整审查"
+
+    # 组合指令
+    "修改建议": ["risk_assessor", "clause_analyst"],  # "有什么修改建议"
+    "对比": ["all"],                       # "对比两份合同"
+}
+```
+
+### 9.3 多轮对话上下文管理
+
+```python
+class ConversationManager:
+    """对话上下文管理器"""
+
+    def __init__(self):
+        # 每个会话的上下文
+        self.sessions: Dict[str, SessionContext] = {}
+
+    def get_context(self, session_id: str) -> SessionContext:
+        """获取会话上下文"""
+        if session_id not in self.sessions:
+            self.sessions[session_id] = SessionContext()
+        return self.sessions[session_id]
+
+
+class SessionContext:
+    """单个会话的上下文"""
+
+    def __init__(self):
+        self.history: List[Dict] = []          # 对话历史
+        self.current_contract: str = ""         # 当前合同文本
+        self.contract_type: str = ""            # 合同类型
+        self.parsed_result: Dict = {}           # 解析结果缓存
+        self.analysis_cache: Dict = {}          # 分析结果缓存
+```
+
+### 9.4 多轮对话示例
+
+```
+第1轮: 上传文件
+  用户: [上传劳动合同.pdf]
+  系统: DocumentParserAgent → 解析结果
+  上下文: current_contract="...", parsed_result={...}
+
+第2轮: 指定分析
+  用户: "这个合同有什么风险？"
+  系统: 意图="风险" → RiskAssessmentAgent(用parsed_result)
+  上下文: analysis_cache["risk"]={...}
+
+第3轮: 追问细节
+  用户: "违约金条款具体怎么改？"
+  系统: 意图="条款修改" → ClauseAnalysisAgent(针对性分析)
+  上下文: 保留之前的风险结果
+
+第4轮: 完整报告
+  用户: "帮我生成完整报告"
+  系统: 意图="报告" → CoordinatorAgent(所有Agent)
+  上下文: 汇总所有已有的分析结果
+```
+
+### 9.5 API接口设计
+
+```python
+# 对话接口
+POST /api/v1/chat
+{
+    "session_id": "xxx",           # 会话ID
+    "message": "评估一下风险",      # 用户消息
+    "file": null                   # 可选：上传文件
+}
+
+# 响应
+{
+    "session_id": "xxx",
+    "reply": "风险评估完成...",     # AI回复
+    "agent_used": "risk_assessor", # 使用的Agent
+    "result": {...},               # 结构化结果
+    "suggestions": [...]           # 后续操作建议
+}
+```
+
+---
+
+## 10. 总结
+
+本系统使用LangChain框架 + 自定义BaseAgent实现智能合同审查，主要特点：
+
+1. **模型灵活性**: 支持MIMO等非Claude模型，通过LLMFactory统一管理
+2. **Agent架构**: 6个专业Agent（协调器+5个分析Agent），BaseAgent基类统一接口
+3. **智能编排**: CoordinatorAgent使用LLM动态规划执行计划，支持并行/串行混合
+4. **记忆系统**: SharedMemoryManager分层存储 + AgentPrivateMemory上下文压缩
+5. **工具集成**: LangChain Tools + Skills双重工具体系
+6. **多轮对话**: 对话上下文管理，支持追问和深入分析
+7. **UI交互**: 对话式界面，文件上传 + 意图路由 + 结构化展示
+
+开发进度：已完成Day 1-14（基础架构+核心Agent+Skills+API），待开发Day 15-25（集成测试+UI与多轮对话）。

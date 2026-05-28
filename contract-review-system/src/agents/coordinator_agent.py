@@ -201,10 +201,17 @@ class CoordinatorAgent(BaseAgent):
                 "parallel": True
             },
             {
+                "task_name": "compliance_check",
+                "agent_role": "compliance_checker",
+                "input_keys": ["contract_text", "contract_type"],
+                "depends_on": [],
+                "parallel": True
+            },
+            {
                 "task_name": "generate_report",
                 "agent_role": "report_generator",
                 "input_keys": ["previous_results"],
-                "depends_on": ["parse_document", "analyze_clauses", "assess_risks"],
+                "depends_on": ["parse_document", "analyze_clauses", "assess_risks", "compliance_check"],
                 "parallel": False
             },
         ]
@@ -367,7 +374,15 @@ class CoordinatorAgent(BaseAgent):
             elif task_name == "assess_risks":
                 aggregated["risk_level"] = result.get("risk_level", "unknown")
                 aggregated["risks"] = result.get("risks", [])
+                aggregated["risk_quantification"] = result.get("risk_quantification", {})
+                aggregated["mitigation_plan"] = result.get("mitigation_plan", [])
                 aggregated["recommendations"] = result.get("recommendations", [])
+            elif task_name == "compliance_check":
+                aggregated["compliance_status"] = result.get("compliance_status", "unknown")
+                aggregated["compliance_score"] = result.get("score", 0)
+                aggregated["compliance_violations"] = result.get("compliance_violations", [])
+                aggregated["missing_clauses"] = result.get("missing_clauses", [])
+                aggregated["compliance_summary"] = result.get("summary", {})
             elif task_name == "generate_report":
                 aggregated["report"] = result.get("report", {})
                 aggregated["summary"] = result.get("summary", {})

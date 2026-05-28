@@ -8,7 +8,7 @@ from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.skills.skill_registry import SkillRegistry
-from src.skills import document_skills
+from src.skills import document_skills, legal_skills, risk_skills, report_skills
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +30,30 @@ class AgentTools:
         self.skill_registry = skill_registry or SkillRegistry()
         self._langchain_tools = []
 
-        # 注册文档处理Skills
+        # 注册Skills
         self._register_document_skills()
+        self._register_legal_skills()
+        self._register_risk_skills()
+        self._register_report_skills()
 
     def _register_document_skills(self):
         """注册文档处理Skills"""
         for skill in document_skills:
+            self.skill_registry.register_skill(skill)
+
+    def _register_legal_skills(self):
+        """注册法律分析Skills"""
+        for skill in legal_skills:
+            self.skill_registry.register_skill(skill)
+
+    def _register_risk_skills(self):
+        """注册风险管理Skills"""
+        for skill in risk_skills:
+            self.skill_registry.register_skill(skill)
+
+    def _register_report_skills(self):
+        """注册报告生成Skills"""
+        for skill in report_skills:
             self.skill_registry.register_skill(skill)
 
     def get_langchain_tools(self) -> List:

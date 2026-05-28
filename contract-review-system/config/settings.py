@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     REDIS_DB: int = Field(default=0, description="Redis数据库")
     REDIS_PASSWORD: Optional[str] = Field(default=None, description="Redis密码")
 
+    # RabbitMQ配置
+    RABBITMQ_HOST: str = Field(default="localhost", description="RabbitMQ主机")
+    RABBITMQ_PORT: int = Field(default=5672, description="RabbitMQ端口")
+    RABBITMQ_USER: str = Field(default="admin", description="RabbitMQ用户名")
+    RABBITMQ_PASSWORD: str = Field(default="admin123", description="RabbitMQ密码")
+    RABBITMQ_VHOST: str = Field(default="/", description="RabbitMQ虚拟主机")
+    RABBITMQ_QUEUE: str = Field(default="contract_review", description="任务队列名称")
+    RABBITMQ_URL: Optional[str] = Field(default=None, description="RabbitMQ连接URL（优先使用）")
+
     # 向量数据库配置
     CHROMA_PERSIST_DIRECTORY: Path = PROJECT_ROOT / "chroma_db"
     CHROMA_COLLECTION_NAME: str = Field(default="contract_regulations", description="集合名称")
@@ -78,3 +87,10 @@ settings = Settings()
 def get_settings() -> Settings:
     """获取配置实例"""
     return settings
+
+
+def get_rabbitmq_url() -> str:
+    """获取RabbitMQ连接URL"""
+    if settings.RABBITMQ_URL:
+        return settings.RABBITMQ_URL
+    return f"amqp://{settings.RABBITMQ_USER}:{settings.RABBITMQ_PASSWORD}@{settings.RABBITMQ_HOST}:{settings.RABBITMQ_PORT}{settings.RABBITMQ_VHOST}"

@@ -183,15 +183,39 @@
 - [x] API + RabbitMQ架构 (Day 7)
 - [x] DocumentParserAgent重构为LLM驱动
 
-### 待完成: LangChain能力集成
-**目标**: 将langchain_agent.py集成到现有Agent中
+### Day 8-10: 已完成的任务
+**状态**: ✅ 已完成
+
+- [x] 条款分析Agent完成 (Day 8)
+- [x] RiskAssessmentAgent增强：风险量化 `quantify_risk()` + 缓解建议 `suggest_mitigation()` (Day 9)
+- [x] ComplianceCheckerAgent新建：LLM驱动合规检查 + 规则回退 + 必备条款检查 (Day 10)
+- [x] Coordinator默认计划增加compliance_check步骤 (Day 10)
+- [x] TaskManager注册ComplianceCheckerAgent (Day 10)
+
+### Day 11-14: 已完成的任务
+**状态**: ✅ 已完成
+
+- [x] 文档处理Skills完成：PDFReaderSkill、DocxParserSkill、OCRProcessorSkill (Day 11)
+- [x] 法律分析Skills完成：ClauseParserSkill、RegulationCheckerSkill、CaseRetrieverSkill (Day 12)
+- [x] 风险管理Skills完成：RiskIdentifierSkill、RiskScorerSkill、MitigationSuggesterSkill (Day 13)
+- [x] 报告生成Skills完成：ReportGeneratorSkill、VisualizationSkill、ExportSkill (Day 14)
+- [x] AgentTools注册所有Skills（文档+法律+风险+报告）
+
+### 待完成: UI界面与多轮对话
+**目标**: 构建前端UI，支持对话式交互和文件上传
 
 **任务清单**:
-- [ ] 给协调器Agent添加对话历史能力
-- [ ] 集成contract_tools工具集
-- [ ] 实现多轮对话审查
-- [ ] 添加工具调用日志
-- [ ] 编写集成测试
+- [ ] 搭建前端UI框架（对话界面 + 文件上传）
+- [ ] 实现意图识别：用户指令 → 路由到对应Agent
+- [ ] 多轮对话：保持上下文，支持追问和深入分析
+- [ ] 文件上传：PDF/DOCX 解析 → 自动进入审查流程
+- [ ] 结果展示：结构化展示各Agent审查结果
+- [ ] 前后端联调
+
+**验收标准**:
+- 用户可以通过对话框上传文件并下达命令
+- 系统根据用户意图自动选择执行的Agent
+- 支持多轮对话，上下文保持
 
 **验收标准**:
 - Agent可以使用工具进行分析
@@ -290,18 +314,19 @@
 
 ### Day 9 (周四): 风险评估Agent实现
 **目标**: 实现合同风险识别和评估
+**状态**: ✅ 已完成
 
 **任务清单**:
-- [ ] 实现风险评估Agent核心逻辑
+- [x] 实现风险评估Agent核心逻辑
   ```python
   class RiskAssessmentAgent(BaseAgent):
       - async def assess(contract: ContractStructure) -> RiskReport
       - async def quantify_risk(risk: Risk) -> RiskScore
       - async def suggest_mitigation(risk: Risk) -> MitigationPlan
   ```
-- [ ] 实现风险识别规则库
-- [ ] 实现风险量化算法
-- [ ] 实现风险缓解建议生成
+- [x] 实现风险识别规则库
+- [x] 实现风险量化算法
+- [x] 实现风险缓解建议生成
 - [ ] 编写风险评估单元测试
 
 **交付物**:
@@ -318,18 +343,19 @@
 
 ### Day 10 (周五): 合规检查Agent实现
 **目标**: 实现法规合规检查功能
+**状态**: ✅ 已完成
 
 **任务清单**:
-- [ ] 实现合规检查Agent核心逻辑
+- [x] 实现合规检查Agent核心逻辑
   ```python
   class ComplianceCheckerAgent(BaseAgent):
       - async def check(contract: ContractStructure) -> ComplianceReport
       - async def verify_against_regulation(clause: Clause, regulation: Regulation) -> ComplianceStatus
       - async def check_missing_clauses(contract: ContractStructure) -> List[str]
   ```
-- [ ] 实现法规匹配算法
-- [ ] 实现必备条款检查
-- [ ] 实现合规报告生成
+- [x] 实现法规匹配算法
+- [x] 实现必备条款检查
+- [x] 实现合规报告生成
 - [ ] 编写合规检查单元测试
 
 **交付物**:
@@ -385,12 +411,13 @@
 
 ### Day 12 (周二): 法律分析Skills开发
 **目标**: 实现法律分析相关的Skills
+**状态**: ✅ 已完成
 
 **任务清单**:
-- [ ] 实现条款解析Skill
-- [ ] 实现法规检查Skill
-- [ ] 实现案例检索Skill
-- [ ] 编写法律分析Skills文档
+- [x] 实现条款解析Skill (`ClauseParserSkill`)
+- [x] 实现法规检查Skill (`RegulationCheckerSkill`)
+- [x] 实现案例检索Skill (`CaseRetrieverSkill`)
+- [x] 编写法律分析Skills文档
 
 **交付物**:
 - 3个法律分析Skills
@@ -406,12 +433,13 @@
 
 ### Day 13 (周三): 风险管理Skills开发
 **目标**: 实现风险管理相关的Skills
+**状态**: ✅ 已完成
 
 **任务清单**:
-- [ ] 实现风险识别Skill
-- [ ] 实现风险量化Skill
-- [ ] 实现风险缓解Skill
-- [ ] 编写风险管理Skills文档
+- [x] 实现风险识别Skill (`RiskIdentifierSkill`) — 14条风险规则库
+- [x] 实现风险量化Skill (`RiskScorerSkill`) — 加权评分 + 风险矩阵
+- [x] 实现风险缓解Skill (`MitigationSuggesterSkill`) — 12套缓解模板 + 条款模板
+- [x] 编写风险管理Skills文档
 
 **交付物**:
 - 3个风险管理Skills
@@ -427,12 +455,13 @@
 
 ### Day 14 (周四): 报告生成Skills开发
 **目标**: 实现报告生成相关的Skills
+**状态**: ✅ 已完成
 
 **任务清单**:
-- [ ] 实现综合报告生成Skill
-- [ ] 实现可视化Skill
-- [ ] 实现导出Skill (PDF/Word/HTML)
-- [ ] 编写报告生成Skills文档
+- [x] 实现综合报告生成Skill (`ReportGeneratorSkill`)
+- [x] 实现可视化Skill (`VisualizationSkill`) — 6种图表数据生成
+- [x] 实现导出Skill (`ExportSkill`) — HTML/Markdown/JSON格式
+- [x] 编写报告生成Skills文档
 
 **交付物**:
 - 3个报告生成Skills
@@ -618,49 +647,134 @@
 
 ---
 
-## 第五周前两天: 优化与完善
+## 第五周: UI界面与多轮对话
 
-### Day 21 (周一): 性能优化
-**目标**: 优化系统整体性能
+### Day 21 (周一): 前端UI框架搭建
+**目标**: 搭建对话式UI界面
 
 **任务清单**:
-- [ ] 性能瓶颈分析
-- [ ] 优化Agent处理逻辑
-- [ ] 优化记忆存储结构
-- [ ] 优化MCP工具调用
-- [ ] 执行性能测试
+- [ ] 选择前端技术栈（Streamlit / Gradio / React）
+- [ ] 创建项目前端目录结构
+- [ ] 实现基础对话界面（消息列表 + 输入框）
+- [ ] 实现文件上传组件（支持PDF/DOCX/TXT）
+- [ ] 对接后端 `/api/v1/upload/sync` 和 `/api/v1/review/sync` 接口
+- [ ] 实现消息发送和接收的基本流程
 
 **交付物**:
-- 性能分析报告
-- 优化方案
-- 性能测试结果
+- 可运行的前端UI原型
+- 文件上传组件
+- 对话消息列表组件
 
 **验收标准**:
-- 合同审查响应时间 < 60秒
-- 内存使用 < 2GB
-- 并发处理能力 > 10个合同
+- 用户可以上传文件
+- 用户可以在对话框输入文字并发送
+- 消息可以正常显示
 
 ---
 
-### Day 22 (周二): 错误处理完善与文档编写
-**目标**: 完善错误处理和编写项目文档
+### Day 22 (周二): 意图识别与Agent路由
+**目标**: 实现用户指令到Agent的智能路由
 
 **任务清单**:
-- [ ] 完善全局错误处理机制
-- [ ] 添加详细的日志记录
-- [ ] 编写API文档
-- [ ] 编写用户使用手册
-- [ ] 编写开发者文档
+- [ ] 设计意图识别逻辑（关键词/LLM分类）
+  ```
+  "解析文件" → DocumentParserAgent
+  "分析条款" → ClauseAnalysisAgent
+  "评估风险" → RiskAssessmentAgent
+  "合规检查" → ComplianceCheckerAgent
+  "生成报告" → 全部Agent（Coordinator完整流程）
+  "整体审查" → 全部Agent
+  ```
+- [ ] 在Coordinator中实现意图路由方法
+- [ ] 实现对话上下文管理（记住用户之前上传的文件）
+- [ ] 前端实现：根据Agent选择显示不同的进度/结果模板
+- [ ] 测试各种指令的路由准确性
 
 **交付物**:
-- 错误处理机制
-- 日志系统
-- 完整的项目文档
+- 意图识别模块
+- Agent路由逻辑
+- 对话上下文管理器
 
 **验收标准**:
-- 错误处理覆盖所有异常场景
-- 日志记录详细且易于排查
-- 文档完整且易于理解
+- 用户说"解析文件"只调用DocumentParserAgent
+- 用户说"生成报告"走完整Coordinator流程
+- 路由准确率 > 90%
+
+---
+
+### Day 23 (周三): 多轮对话实现
+**目标**: 实现上下文保持的多轮对话
+
+**任务清单**:
+- [ ] 实现对话历史存储（内存 + 可选Redis）
+- [ ] 实现上下文注入：将历史对话 + 上传文件内容注入LLM
+- [ ] 支持追问场景：
+  ```
+  用户: 上传合同文件 → 自动解析
+  用户: "这个合同有什么风险？" → 风险评估Agent（用之前解析的结果）
+  用户: "违约金条款能改吗？" → 条款分析Agent（针对性分析）
+  用户: "帮我生成完整报告" → Coordinator完整流程
+  ```
+- [ ] 前端实现：显示对话历史，支持滚动查看
+- [ ] 测试多轮对话的上下文连贯性
+
+**交付物**:
+- 对话历史管理器
+- 上下文注入机制
+- 多轮对话测试用例
+
+**验收标准**:
+- 对话上下文在多轮中保持连贯
+- Agent可以引用之前的分析结果
+- 用户无需重复上传文件
+
+---
+
+### Day 24 (周四): 结果展示与交互优化
+**目标**: 优化审查结果的展示效果
+
+**任务清单**:
+- [ ] 设计结构化结果展示模板：
+  - 风险等级用颜色标识（红/黄/绿）
+  - 条款问题列表可折叠展开
+  - 合规检查结果表格化展示
+  - 报告支持Markdown渲染
+- [ ] 实现"正在审查..."的加载动画
+- [ ] 实现审查进度实时显示（哪个Agent在工作）
+- [ ] 前端实现：结果卡片、进度条、状态提示
+- [ ] 测试端到端流程
+
+**交付物**:
+- 结果展示模板
+- 加载动画组件
+- 进度显示组件
+
+**验收标准**:
+- 审查结果清晰易读
+- 加载状态有明确提示
+- 端到端流程可跑通
+
+---
+
+### Day 25 (周五): 联调与测试
+**目标**: 前后端联调，修复问题
+
+**任务清单**:
+- [ ] 前后端联调测试
+- [ ] 修复联调中发现的bug
+- [ ] 测试各种边界情况（空文件、超大文件、特殊格式）
+- [ ] 性能优化（响应时间、并发处理）
+- [ ] 编写使用说明文档
+
+**交付物**:
+- 完整可运行的系统
+- Bug修复记录
+- 使用说明文档
+
+**验收标准**:
+- 系统可以完整运行
+- 所有核心功能正常
+- 用户可以独立使用
 
 ---
 
@@ -691,9 +805,11 @@
 - [ ] 系统可以正常运行
 
 ### Week 5 结束检查
-- [ ] 性能优化完成
-- [ ] 错误处理完善
-- [ ] 文档完整
+- [ ] UI界面搭建完成
+- [ ] 意图识别与Agent路由正常
+- [ ] 多轮对话上下文保持正常
+- [ ] 结果展示清晰易读
+- [ ] 前后端联调通过
 - [ ] 项目可以交付
 
 ---
@@ -768,12 +884,36 @@
 
 ## 总结
 
-本30天开发计划将智能合同审查系统的开发分为5个阶段：
+本25天开发计划将智能合同审查系统的开发分为5个阶段：
 
-1. **第一周**: 基础架构搭建 (环境、框架、记忆系统)
-2. **第二周**: 核心Agent实现 (5个专业Agent)
-3. **第三周**: Skills和MCP工具开发 (可复用能力模块)
-4. **第四周**: 集成测试 (协作、记忆、MCP工具)
-5. **第五周前两天**: 优化完善 (性能、错误处理、文档)
+1. **第一周 (Day 1-5)**: 基础架构搭建 (环境、Agent基类、记忆系统、MCP Server)
+2. **第二周 (Day 6-10)**: 核心Agent实现 (协调器、文档解析、条款分析、风险评估、合规检查)
+3. **第三周 (Day 11-15)**: Skills和MCP工具开发 (文档处理、法律分析、风险管理、报告生成)
+4. **第四周 (Day 16-20)**: 集成测试 (协作、记忆、MCP工具)
+5. **第五周 (Day 21-25)**: UI界面与多轮对话 (前端搭建、意图路由、多轮对话、结果展示、联调)
+
+### 核心交互流程
+
+```
+用户上传文件/输入指令
+        ↓
+   意图识别（LLM分类）
+        ↓
+   ┌────┴────┐
+   │ 路由选择 │
+   └────┬────┘
+        ↓
+  ┌─────┼─────┬──────┬──────┐
+  ↓     ↓     ↓      ↓      ↓
+解析   条款   风险    合规    完整
+Agent  分析   评估    检查    审查
+       Agent Agent  Agent  (全部)
+  ↓     ↓     ↓      ↓      ↓
+  └─────┴─────┴──────┴──────┘
+        ↓
+   结果展示（对话回复）
+        ↓
+   用户追问/新指令（多轮对话）
+```
 
 通过每日明确的任务和验收标准，确保项目按时高质量交付。

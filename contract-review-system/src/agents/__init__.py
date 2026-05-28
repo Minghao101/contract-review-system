@@ -8,6 +8,7 @@ from .coordinator_agent import CoordinatorAgent
 from .document_parser_agent import DocumentParserAgent
 from .clause_analysis_agent import ClauseAnalysisAgent
 from .risk_assessment_agent import RiskAssessmentAgent
+from .compliance_checker_agent import ComplianceCheckerAgent
 from .report_generator_agent import ReportGeneratorAgent
 from .langchain_agent import LangChainAgentWrapper, create_llm_agent
 from .agent_tools import AgentTools, AgentWithTools
@@ -22,6 +23,7 @@ __all__ = [
     "DocumentParserAgent",
     "ClauseAnalysisAgent",
     "RiskAssessmentAgent",
+    "ComplianceCheckerAgent",
     "ReportGeneratorAgent",
     "LangChainAgentWrapper",
     "create_llm_agent",
