@@ -1,70 +1,81 @@
 ---
 name: contract-review-development
-description: 智能合同审查系统（contract-review-system）开发辅助 Skill。基于 LangChain + LLM 多 Agent 架构，提供项目架构导航、编码规范、开发指南，用于高效开发和维护合同审查系统。
+description: 智能合同审查系统的开发指导，包含多Agent协作架构、LLM驱动分析、MCP协议通信、分层记忆系统等完整技术栈的开发规范和最佳实践。
 ---
 
-# 智能合同审查系统 - 开发辅助 Skill
+# 智能合同审查系统 - 开发指导 Skill
 
-## 项目概述
+## 概述
 
-基于 LangChain + MIMO 模型的多 Agent 智能合同审查系统，支持劳动合同、采购合同、租赁合同、技术合同、服务合同的自动化审查。
-
-**核心技术栈**: LangChain / LangGraph / FastAPI / Redis / ChromaDB / Pydantic
-
-## 开发进度
-
-| 阶段 | 天数 | 状态 | 内容 |
-|------|------|------|------|
-| 基础架构 | Day 1-5 | ✅ 完成 | 项目结构、LLM配置、BaseAgent、记忆系统、MCP Server |
-| 核心Agent | Day 6-10 | ✅ 完成 | CoordinatorAgent、DocumentParser、ClauseAnalysis、RiskAssessment、ComplianceChecker |
-| Skills开发 | Day 11-14 | ✅ 完成 | 12个Skills（document/legal/risk/report）+ SkillRegistry + AgentTools |
-| API层 | 额外 | ✅ 完成 | FastAPI路由、TaskManager（RabbitMQ+持久化）、文件上传 |
-| 工具集成测试 | Day 15 | 🔄 待开发 | 测试所有工具集成、修复问题、优化性能 |
-| 集成测试 | Day 16-20 | 🔄 待开发 | Agent协作、记忆系统、工作流、性能优化、错误处理 |
-| UI与多轮对话 | Day 21-25 | 🔄 待开发 | 前端UI、意图识别、多轮对话、结果展示、联调测试 |
-
-**下一步**: Day 15 工具集成测试 → Day 16-20 集成测试 → Day 21-25 UI开发
+本 Skill 为智能合同审查系统（Contract Review System）的开发提供完整的技术指导。系统基于 LangChain + 多Agent协作架构，使用 MIMO 模型进行智能合同分析。
 
 ## 快速导航
 
-| 场景 | 参考文件 |
-|------|----------|
-| 了解项目架构、Agent 角色、数据流 | [architecture.md](references/architecture.md) |
-| 编写代码时的命名、格式、模式规范 | [coding-conventions.md](references/coding-conventions.md) |
-| 新增/修改 Agent、Skill、Tool、API 的开发流程 | [development-guide.md](references/development-guide.md) |
+### 架构理解
+- **系统架构**: 查看 `contract-review-system/architecture/README.md` — 系统全景图和分层架构
+- **详细架构**: 查看 `contract-review-system/architecture/system-architecture.md` — 分层、依赖、时序图
+- **Agent工作流**: 查看 `contract-review-system/architecture/agent-workflow.md` — 多Agent协作流程
+- **数据模型**: 查看 `contract-review-system/architecture/data-model.md` — 记忆层次和数据结构
+- **基础设施**: 查看 `contract-review-system/architecture/infrastructure.md` — LLM/MCP/Redis/RabbitMQ
 
-## 核心目录结构
+### 开发规范
+- **编码规范**: 查看 `references/coding-conventions.md`
+- **开发指南**: 查看 `references/development-guide.md`
+- **架构参考**: 查看 `references/architecture.md`
+
+## 核心架构要点
+
+### 1. 五层架构
+```
+L1 接入层 → L2 业务编排层 → L3 专业Agent层 → L4 能力层 → L5 基础设施层
+```
+
+### 2. 五个核心 Agent
+| Agent | 职责 | 输入 | 输出 |
+|-------|------|------|------|
+| CoordinatorAgent | 智能调度，LLM生成执行计划 | contract_text | 执行计划 |
+| DocumentParserAgent | 文档解析，提取结构化信息 | contract_text | meta + clauses + key_terms |
+| ClauseAnalysisAgent | 条款分析，完整性/歧义/公平性 | contract_text | clause_analysis |
+| RiskAssessmentAgent | 风险评估，识别/评分/缓解 | contract_text + type | risk_assessment |
+| ComplianceCheckerAgent | 合规检查，必备条款/法规 | contract_text + type | compliance_check |
+| ReportGeneratorAgent | 报告生成，汇总所有分析 | previous_results | final_report |
+
+### 3. 三层记忆
+- **CONTEXT层**: 合同上下文（原始文档、结构化条款、元数据）
+- **ANALYSIS层**: 分析结果（条款分析、风险评估、合规检查）
+- **DECISION层**: 决策历史（审查决策、冲突解决、最终建议）
+
+### 4. 执行流程
+```
+阶段1: 文档解析 → CONTEXT层
+阶段2: 条款分析 + 风险评估 + 合规检查（并行） → ANALYSIS层
+阶段3: 报告生成 → DECISION层
+```
+
+## 开发时的关键约定
+
+1. **所有 Agent 继承 `BaseAgent`**，实现 `process(task) -> Dict` 方法
+2. **所有 Skill 继承 `BaseSkill`**，实现 `execute(**kwargs) -> Dict` 方法
+3. **Agent 使用 LLM 驱动**，正则作为回退方案
+4. **共享记忆使用 `SharedMemoryManager`**，分层存储
+5. **技能通过 `SkillRegistry` 注册为 MCP 工具**
+6. **配置统一在 `config/settings.py`**，使用 Pydantic Settings
+
+## 文件结构
 
 ```
 contract-review-system/
 ├── src/
-│   ├── agents/          # 6 个 Agent（BaseAgent 基类 + 5 个专业 Agent）
-│   ├── memory/          # 记忆系统（SharedMemory + PrivateMemory）
-│   ├── mcp/             # MCP Server/Client/Protocol
-│   ├── skills/          # 12 个 Skill（document/legal/risk/report 四类）
-│   ├── tools/           # LangChain Tools 集成
-│   ├── api/             # FastAPI 后端 + TaskManager
-│   └── utils/           # LLM 工厂、日志、验证器
-├── config/settings.py   # Pydantic Settings 配置
-├── tests/               # 测试用例
-└── data/                # 样本数据和任务索引
+│   ├── agents/          # Agent实现（6个Agent）
+│   ├── api/             # FastAPI接口
+│   ├── mcp/             # MCP协议（Server/Client/Protocol）
+│   ├── memory/          # 记忆系统（共享/私有/层次）
+│   ├── skills/          # 技能库（文档/法律/风险/报告）
+│   ├── tools/           # LangChain Tools
+│   ├── utils/           # 工具函数（LLM工厂/日志/验证）
+│   └── workflow/        # 工作流定义
+├── config/              # 配置管理
+├── data/                # 数据文件
+├── tests/               # 测试代码
+└── architecture/        # 架构文档（30+ Mermaid图）
 ```
-
-## 关键入口文件
-
-- 配置: [`config/settings.py`](contract-review-system/config/settings.py)
-- Agent 基类: [`src/agents/base_agent.py`](contract-review-system/src/agents/base_agent.py)
-- 协调器: [`src/agents/coordinator_agent.py`](contract-review-system/src/agents/coordinator_agent.py)
-- API 入口: [`src/api/main.py`](contract-review-system/src/api/main.py)
-- 任务管理: [`src/api/task_manager.py`](contract-review-system/src/api/task_manager.py)
-- Skill 注册: [`src/skills/skill_registry.py`](contract-review-system/src/skills/skill_registry.py)
-- 工具集成: [`src/agents/agent_tools.py`](contract-review-system/src/agents/agent_tools.py)
-
-## 开发注意事项
-
-1. **所有 Agent 必须继承 [`BaseAgent`](contract-review-system/src/agents/base_agent.py:12) 并实现 `process()` 抽象方法**
-2. **LLM 调用通过 [`get_llm()`](contract-review-system/src/utils/llm_factory.py) 统一获取，不要直接实例化模型**
-3. **新 Agent 需在 [`TaskManager`](contract-review-system/src/api/task_manager.py) 中注册**
-4. **新 Skill 需继承 [`BaseSkill`](contract-review-system/src/skills/base_skill.py) 并在 [`SkillRegistry`](contract-review-system/src/skills/skill_registry.py) 中注册**
-5. **MCP 工具需在 [`MCPServer`](contract-review-system/src/mcp/server.py) 中注册 handler**
-6. **配置变更统一在 [`Settings`](contract-review-system/config/settings.py:11) 类中管理，通过 `.env` 覆盖**

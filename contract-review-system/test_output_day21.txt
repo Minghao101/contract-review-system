@@ -1,0 +1,43 @@
+2026-05-31 01:21:56.510 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-05-31 01:21:56.701 
+  [33m[1mWarning:[0m to view this Streamlit app on a browser, run it with the following
+  command:
+
+    streamlit run tests/test_frontend.py [ARGUMENTS]
+2026-05-31 01:21:56.701 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-05-31 01:21:56.701 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+
+============================================================
+📋 Day 21: 前端UI框架测试
+============================================================
+  ✅ Streamlit导入
+  ✅ 前端模块导入
+  ✅ 对话组件导入
+  ✅ 文件上传组件导入
+  ✅ 侧边栏组件导入
+  ✅ 结果展示组件导入
+  ✅ 对话组件内部函数
+  ✅ 文件上传组件内部函数
+  ✅ 侧边栏组件内部函数
+  ✅ 审查结果格式化
+  ✅ 带错误的结果格式化
+  ✅ 默认示例合同
+  ✅ TXT文件读取
+  ✅ 不支持文件类型
+  ✅ 结果展示组件渲染
+  ✅ 带数据的结果展示
+  ✅ 主应用入口函数
+  ✅ 对话渲染函数签名
+  ✅ 文件上传渲染函数签名
+  ✅ 侧边栏渲染函数签名
+  ✅ 结果展示渲染函数签名
+  ✅ 前端目录结构
+  ✅ 对话组件模块文档
+  ✅ 文件上传组件模块文档
+  ✅ 侧边栏组件模块文档
+  ✅ 结果展示组件模块文档
+
+------------------------------------------------------------
+📊 测试结果: 26/26 通过
+🎉 全部通过！
+============================================================

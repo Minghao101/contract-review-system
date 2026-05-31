@@ -92,9 +92,23 @@ class MessageBus:
             self._subscribers[agent_id] = []
         self._subscribers[agent_id].append(callback)
 
-    def unsubscribe(self, agent_id: str):
-        """取消订阅"""
-        if agent_id in self._subscribers:
+    def unsubscribe(self, agent_id: str, callback=None):
+        """
+        取消订阅
+
+        Args:
+            agent_id: Agent ID
+            callback: 可选，指定要移除的回调函数。若为None则移除该agent所有订阅
+        """
+        if agent_id not in self._subscribers:
+            return
+        if callback is not None:
+            self._subscribers[agent_id] = [
+                cb for cb in self._subscribers[agent_id] if cb != callback
+            ]
+            if not self._subscribers[agent_id]:
+                del self._subscribers[agent_id]
+        else:
             del self._subscribers[agent_id]
 
     def publish(self, message: AgentMessage):

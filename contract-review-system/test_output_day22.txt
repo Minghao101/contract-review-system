@@ -1,0 +1,60 @@
+
+============================================================
+📋 Day 22: 意图识别与Agent路由测试
+============================================================
+  ✅ 意图识别器导入
+  ✅ 意图类型枚举
+  ✅ Intent数据类
+  ✅ 识别-合同审查
+  ✅ 识别-条款分析
+  ❌ 识别-风险评估: 
+  ✅ 识别-合规检查
+  ✅ 识别-报告生成
+  ✅ 识别-问题回答
+  ✅ 识别-问候
+  ✅ 识别-空输入
+  ✅ 识别-未知意图
+  ✅ 批量识别
+  ❌ 上下文影响: 
+  ❌ 自定义关键词规则: 
+  ✅ 支持的意图列表
+  ✅ Hybrid模式无LLM
+  ✅ 对话上下文导入
+  ✅ 对话状态枚举
+  ✅ Message数据类
+  ❌ 创建对话上下文: 'ConversationContext' object has no attribute '_metadata'
+  ❌ 消息流: 'ConversationContext' object has no attribute '_metadata'
+  ❌ 意图链: 'ConversationContext' object has no attribute '_metadata'
+  ❌ Agent结果管理: 'ConversationContext' object has no attribute '_metadata'
+  ❌ 文件上传: 'ConversationContext' object has no attribute '_metadata'
+  ❌ LLM上下文构建: 'ConversationContext' object has no attribute '_metadata'
+  ❌ 任务上下文构建: 'ConversationContext' object has no attribute '_metadata'
+  ❌ 序列化反序列化: 'ConversationContext' object has no attribute '_metadata'
+  ❌ 文件持久化: 'ConversationContext' object has no attribute '_metadata'
+  ❌ 清空上下文: 'ConversationContext' object has no attribute '_metadata'
+  ❌ 获取状态: 'ConversationContext' object has no attribute '_metadata'
+  ❌ 对话管理器: 'ConversationContext' object has no attribute '_metadata'
+  ❌ 最大会话数: 'ConversationContext' object has no attribute '_metadata'
+  ✅ Agent模块导出
+
+------------------------------------------------------------
+📊 测试结果: 18/34 通过
+
+❌ 失败的测试:
+  - 识别-风险评估
+  - 上下文影响
+  - 自定义关键词规则
+  - 创建对话上下文
+  - 消息流
+  - 意图链
+  - Agent结果管理
+  - 文件上传
+  - LLM上下文构建
+  - 任务上下文构建
+  - 序列化反序列化
+  - 文件持久化
+  - 清空上下文
+  - 获取状态
+  - 对话管理器
+  - 最大会话数
+============================================================

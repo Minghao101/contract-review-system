@@ -12,6 +12,12 @@ from .compliance_checker_agent import ComplianceCheckerAgent
 from .report_generator_agent import ReportGeneratorAgent
 from .langchain_agent import LangChainAgentWrapper, create_llm_agent
 from .agent_tools import AgentTools, AgentWithTools
+from .intent_recognizer import IntentRecognizer, IntentType, Intent
+from .conversation_context import (
+    ConversationContext, ConversationManager, ConversationState,
+    Message, TurnContext
+)
+from .multi_turn_handler import MultiTurnHandler
 
 __all__ = [
     "BaseAgent",
@@ -29,4 +35,13 @@ __all__ = [
     "create_llm_agent",
     "AgentTools",
     "AgentWithTools",
+    "IntentRecognizer",
+    "IntentType",
+    "Intent",
+    "ConversationContext",
+    "ConversationManager",
+    "ConversationState",
+    "Message",
+    "TurnContext",
+    "MultiTurnHandler",
 ]

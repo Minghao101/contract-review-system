@@ -11,6 +11,7 @@ from datetime import datetime
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .base_agent import BaseAgent
+from src.utils.llm_response import extract_llm_content, parse_json_from_llm
 
 logger = logging.getLogger(__name__)
 
@@ -182,14 +183,10 @@ class DocumentParserAgent(BaseAgent):
         try:
             # 异步调用LLM
             response = await self.llm.ainvoke(messages)
-            content = response.content
-
-            # 处理list格式响应
-            if isinstance(content, list):
-                content = content[0].get("text", "") if content else ""
+            content = extract_llm_content(response.content)
 
             # 容错JSON解析
-            result = self._parse_json_with_repair(content.strip())
+            result = parse_json_from_llm(content)
 
             if isinstance(result, dict):
                 return result
@@ -325,12 +322,9 @@ class DocumentParserAgent(BaseAgent):
 
         try:
             response = await self.llm.ainvoke(messages)
-            content = response.content
+            content = extract_llm_content(response.content)
 
-            if isinstance(content, list):
-                content = content[0].get("text", "") if content else ""
-
-            return self._parse_json_with_repair(content.strip())
+            return parse_json_from_llm(content)
         except Exception as e:
             logger.warning(f"块{chunk_index}提取失败: {e}")
             return {

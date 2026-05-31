@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from .base_agent import BaseAgent
 from .communication import MessageBus, AgentMessage, MessageType
+from src.utils.llm_response import extract_llm_content, parse_json_from_llm
 
 logger = logging.getLogger(__name__)
 
@@ -159,22 +160,66 @@ class CoordinatorAgent(BaseAgent):
 
         try:
             response = self.llm.invoke(messages)
-            content = response.content.strip()
+            content = extract_llm_content(response.content)
 
-            # 提取JSON
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0]
+            # 尝试解析JSON
+            plan = parse_json_from_llm(content)
 
-            plan = json.loads(content)
+            # 如果是dict，尝试提取plan列表
+            if isinstance(plan, dict):
+                plan = plan.get("plan", plan.get("tasks", []))
+
             if isinstance(plan, list) and len(plan) > 0:
-                return plan
+                return self._validate_plan(plan)
         except Exception as e:
             logger.warning(f"LLM规划失败，使用默认计划: {e}")
 
         # 默认执行计划
         return self._get_default_plan()
+
+    def _validate_plan(self, plan: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        验证并修复执行计划
+
+        确保每个任务都有必要的字段（task_name, agent_role等）
+        """
+        validated_plan = []
+        default_task_names = ["parse_document", "analyze_clauses", "assess_risks", "compliance_check", "generate_report"]
+        default_agent_roles = ["document_parser", "clause_analyst", "risk_assessor", "compliance_checker", "report_generator"]
+
+        for i, task in enumerate(plan):
+            if not isinstance(task, dict):
+                logger.warning(f"任务项不是字典类型: {task}")
+                continue
+
+            # 如果缺少task_name，使用默认值
+            if "task_name" not in task:
+                task["task_name"] = default_task_names[i] if i < len(default_task_names) else f"task_{i}"
+                logger.warning(f"任务缺少task_name，已添加默认值: {task['task_name']}")
+
+            # 如果缺少agent_role，根据task_name推断
+            if "agent_role" not in task:
+                task_name = task.get("task_name", "")
+                # 尝试匹配默认角色
+                for j, default_name in enumerate(default_task_names):
+                    if default_name in task_name or task_name in default_name:
+                        task["agent_role"] = default_agent_roles[j]
+                        break
+                else:
+                    task["agent_role"] = "coordinator"
+                logger.warning(f"任务缺少agent_role，已添加: {task['agent_role']}")
+
+            # 确保depends_on存在
+            if "depends_on" not in task:
+                task["depends_on"] = []
+
+            # 确保input_keys存在
+            if "input_keys" not in task:
+                task["input_keys"] = ["contract_text", "contract_type"]
+
+            validated_plan.append(task)
+
+        return validated_plan if validated_plan else self._get_default_plan()
 
     def _get_default_plan(self) -> List[Dict[str, Any]]:
         """默认执行计划（LLM失败时的回退）"""
@@ -316,10 +361,23 @@ class CoordinatorAgent(BaseAgent):
                 task_input["review_focus"] = original_task.get("review_focus", [])
             elif key == "previous_results":
                 task_input["previous_results"] = previous_results
-            else:
+            elif key in previous_results:
+                # 从之前的执行结果中获取
+                task_input[key] = previous_results[key]
+            elif key in original_task:
                 # 从原始任务中获取
-                if key in original_task:
-                    task_input[key] = original_task[key]
+                task_input[key] = original_task[key]
+            else:
+                # 未知key，跳过但记录日志
+                logger.warning(f"未知的输入key: {key}，已跳过")
+
+        # 确保所有agent都能拿到contract_text
+        if "contract_text" not in task_input:
+            task_input["contract_text"] = contract_text
+
+        # 确保有contract_type
+        if "contract_type" not in task_input:
+            task_input["contract_type"] = original_task.get("contract_type", "general")
 
         return task_input
 
@@ -360,30 +418,36 @@ class CoordinatorAgent(BaseAgent):
             "recommendations": []
         }
 
+        # 构建 task_name -> agent_role 映射（从执行计划）
+        # 这里用 result 中的数据结构来判断来源，而不是靠 task_name
         for task_name, task_result in results.items():
             if task_result.get("status") != "completed":
                 continue
 
             result = task_result.get("result", {})
+            if not isinstance(result, dict):
+                continue
 
-            if task_name == "parse_document":
-                aggregated["document_info"] = result.get("document_info", {})
-            elif task_name == "analyze_clauses":
-                aggregated["sections"] = result.get("sections", {})
+            # 根据 result 的数据结构判断来源
+            if "document_info" in result:
+                aggregated["document_info"] = result["document_info"]
+            elif "analysis" in result or "issues_found" in result:
+                # clause analysis agent
+                aggregated["sections"] = result.get("sections", [])
                 aggregated["clause_analysis"] = result.get("analysis", {})
-            elif task_name == "assess_risks":
+            elif "risk_level" in result and "risks" in result:
                 aggregated["risk_level"] = result.get("risk_level", "unknown")
                 aggregated["risks"] = result.get("risks", [])
                 aggregated["risk_quantification"] = result.get("risk_quantification", {})
                 aggregated["mitigation_plan"] = result.get("mitigation_plan", [])
                 aggregated["recommendations"] = result.get("recommendations", [])
-            elif task_name == "compliance_check":
+            elif "compliance_status" in result or "compliance_violations" in result:
                 aggregated["compliance_status"] = result.get("compliance_status", "unknown")
                 aggregated["compliance_score"] = result.get("score", 0)
                 aggregated["compliance_violations"] = result.get("compliance_violations", [])
                 aggregated["missing_clauses"] = result.get("missing_clauses", [])
                 aggregated["compliance_summary"] = result.get("summary", {})
-            elif task_name == "generate_report":
+            elif "report" in result or "generated_at" in result:
                 aggregated["report"] = result.get("report", {})
                 aggregated["summary"] = result.get("summary", {})
 

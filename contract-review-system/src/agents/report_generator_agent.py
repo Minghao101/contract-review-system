@@ -9,6 +9,8 @@ import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.utils.llm_response import extract_llm_content, parse_json_from_llm
+
 from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -157,12 +159,9 @@ class ReportGeneratorAgent(BaseAgent):
 
         try:
             response = await self.llm.ainvoke(messages)
-            content = response.content
+            content = extract_llm_content(response.content)
 
-            if isinstance(content, list):
-                content = content[0].get("text", "") if content else ""
-
-            result = self._parse_json(content.strip())
+            result = parse_json_from_llm(content)
 
             if isinstance(result, dict):
                 result["generated_at"] = datetime.now().isoformat()
