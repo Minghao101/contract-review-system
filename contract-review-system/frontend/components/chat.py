@@ -137,11 +137,17 @@ def _handle_user_input(user_input: str):
     contract_text = st.session_state.get("uploaded_file_content")
     file_name = st.session_state.get("uploaded_file_name", "未知文件")
 
+    # 特殊命令：查询历史记忆
+    if user_input.strip() in ["查看历史", "历史记录", "查询记忆", "我的审查"]:
+        _query_memory(user_input)
+        st.rerun()
+        return
+
     if not contract_text:
         # 没有上传文件，提示用户
         st.session_state["messages"].append({
             "role": "assistant",
-            "content": "⚠️ 请先上传合同文件，然后我才能帮你分析。",
+            "content": "⚠️ 请先上传合同文件，然后我才能帮你分析。\n\n你也可以输入「查看历史」来查看之前的审查记录。",
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
         st.rerun()
@@ -149,6 +155,48 @@ def _handle_user_input(user_input: str):
 
     # 有文件，调用后端分析
     _process_with_backend(contract_text, user_input, file_name)
+
+
+def _query_memory(query: str):
+    """查询历史记忆"""
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/memory/recall",
+            params={"query": query, "top_k": 5},
+            timeout=30
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            memories = data.get("memories", [])
+
+            if memories:
+                lines = ["## 📚 历史审查记忆\n"]
+                for i, m in enumerate(memories, 1):
+                    name = m.get("contract_name", "未知")
+                    created = m.get("created_at", "")[:10]
+                    summary = m.get("result_summary", {})
+                    risk = summary.get("risk_level", "未知")
+                    score = summary.get("compliance_score", "未知")
+                    lines.append(f"**{i}. {name}** ({created})")
+                    lines.append(f"   风险等级: {risk} | 合规分数: {score}")
+                    lines.append("")
+                content = "\n".join(lines)
+            else:
+                content = "📭 暂无历史审查记录。上传合同文件后，审查结果会自动保存。"
+        else:
+            content = "⚠️ 查询记忆失败，请确认后端服务已启动。"
+
+    except requests.exceptions.ConnectionError:
+        content = "❌ 无法连接到后端服务，请确认 FastAPI 已启动。"
+    except Exception as e:
+        content = f"❌ 查询失败: {str(e)}"
+
+    st.session_state["messages"].append({
+        "role": "assistant",
+        "content": content,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
 
 
 def _process_with_backend(contract_text: str, question: str, file_name: str):
@@ -169,6 +217,17 @@ def _process_with_backend(contract_text: str, question: str, file_name: str):
             if response.status_code == 200:
                 result = response.json()
                 st.session_state["review_result"] = result
+
+                # 保存到历史记录
+                if "review_history" not in st.session_state:
+                    st.session_state["review_history"] = []
+                st.session_state["review_history"].append({
+                    "contract_name": file_name,
+                    "status": result.get("status", "completed"),
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "result": result,
+                    "question": question
+                })
 
                 # 格式化回答
                 answer = _format_answer(result, question, file_name)

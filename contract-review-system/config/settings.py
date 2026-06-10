@@ -39,9 +39,11 @@ class Settings(BaseSettings):
     RABBITMQ_QUEUE: str = Field(default="contract_review", description="任务队列名称")
     RABBITMQ_URL: Optional[str] = Field(default=None, description="RabbitMQ连接URL（优先使用）")
 
-    # 向量数据库配置
-    CHROMA_PERSIST_DIRECTORY: Path = PROJECT_ROOT / "chroma_db"
-    CHROMA_COLLECTION_NAME: str = Field(default="contract_regulations", description="集合名称")
+    # Qdrant向量数据库配置
+    QDRANT_URL: str = Field(default="http://localhost:6333", description="Qdrant服务地址")
+    QDRANT_COLLECTION_REGULATIONS: str = Field(default="contract_regulations", description="法规集合名称")
+    QDRANT_COLLECTION_CASES: str = Field(default="legal_cases", description="案例集合名称")
+    QDRANT_COLLECTION_MEMORY: str = Field(default="long_term_memory", description="长期记忆集合名称")
     EMBEDDING_MODEL: str = Field(default="all-MiniLM-L6-v2", description="嵌入模型")
 
     # 文档处理配置

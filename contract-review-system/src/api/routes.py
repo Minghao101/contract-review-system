@@ -110,6 +110,38 @@ async def list_tasks(status: Optional[str] = None, limit: int = 10):
     return {"tasks": tasks}
 
 
+@router.get("/memory/recall")
+async def recall_memory(
+    query: str = "",
+    memory_type: Optional[str] = None,
+    top_k: int = 5,
+):
+    """查询历史记忆"""
+    try:
+        from src.memory.long_term_memory import get_long_term_memory
+        memory = get_long_term_memory()
+        results = memory.recall(
+            query=query,
+            memory_type=memory_type,
+            top_k=top_k,
+        )
+        return {"memories": results, "total": len(results)}
+    except Exception as e:
+        return {"memories": [], "total": 0, "error": str(e)}
+
+
+@router.get("/memory/history")
+async def get_review_history(top_k: int = 10):
+    """获取审查历史"""
+    try:
+        from src.memory.long_term_memory import get_long_term_memory
+        memory = get_long_term_memory()
+        results = memory.get_review_history(top_k=top_k)
+        return {"memories": results, "total": len(results)}
+    except Exception as e:
+        return {"memories": [], "total": 0, "error": str(e)}
+
+
 @router.post("/upload", response_model=FileUploadResponse)
 async def upload_contract_file(
     file: UploadFile = File(..., description="合同文件（支持PDF、DOCX、TXT）"),

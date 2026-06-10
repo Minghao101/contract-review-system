@@ -1,11 +1,12 @@
 """
-法规检查Skill - 检查合同条款是否符合相关法律法规
+法规检查Skill - 基于Qdrant向量检索 + 正则规则检查合同合规性
 """
 from typing import Any, Dict, List, Optional
 import re
 import logging
 
 from ..base_skill import BaseSkill
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,19 @@ class RegulationCheckerSkill(BaseSkill):
             name="法规检查",
             description="检查合同条款是否符合相关法律法规，识别违规条款",
         )
+        self._vector_store = None
+
+    @property
+    def vector_store(self):
+        """延迟加载向量存储"""
+        if self._vector_store is None:
+            try:
+                from src.services.vector_store import get_vector_store
+                self._vector_store = get_vector_store()
+            except Exception as e:
+                logger.warning(f"Qdrant连接失败，使用本地规则: {e}")
+                self._vector_store = False
+        return self._vector_store
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """
@@ -128,13 +142,16 @@ class RegulationCheckerSkill(BaseSkill):
         try:
             rules = custom_regulations or self.REGULATION_RULES
 
-            # 1. 执行规则匹配
+            # 1. 执行正则规则匹配
             violations = self._check_violations(text, rules)
 
-            # 2. 检查必备条款
+            # 2. 向量检索相关法规（语义匹配）
+            related_regulations = self._vector_search_regulations(text)
+
+            # 3. 检查必备条款
             missing = self._check_mandatory_clauses(text, contract_type)
 
-            # 3. 统计结果
+            # 4. 统计结果
             total_rules = len(rules)
             violated_rules = len(set(v["rule_id"] for v in violations))
 
@@ -142,6 +159,7 @@ class RegulationCheckerSkill(BaseSkill):
                 "total_rules_checked": total_rules,
                 "violations_found": len(violations),
                 "violations": violations,
+                "related_regulations": related_regulations,
                 "missing_clauses": missing,
                 "compliance_score": max(
                     0, int(((total_rules - violated_rules) / total_rules) * 100)
@@ -155,6 +173,24 @@ class RegulationCheckerSkill(BaseSkill):
         except Exception as e:
             logger.error(f"法规检查失败: {e}")
             return {"error": str(e)}
+
+    def _vector_search_regulations(self, text: str) -> List[Dict[str, Any]]:
+        """向量检索与合同文本相关的法规"""
+        if not self.vector_store or self.vector_store is False:
+            return []
+
+        try:
+            # 取合同前2000字作为查询
+            query = text[:2000]
+            results = self.vector_store.search(
+                collection_name=settings.QDRANT_COLLECTION_REGULATIONS,
+                query=query,
+                top_k=5,
+            )
+            return results
+        except Exception as e:
+            logger.warning(f"法规向量检索失败: {e}")
+            return []
 
     def _check_violations(
         self, text: str, rules: List[Dict]

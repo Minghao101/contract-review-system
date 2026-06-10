@@ -234,6 +234,7 @@ class TaskManager:
         contract_text: str,
         contract_type: str = "general",
         review_focus: list = None,
+        contract_name: str = "未命名合同",
     ) -> Dict[str, Any]:
         """
         同步处理任务
@@ -242,6 +243,7 @@ class TaskManager:
             contract_text: 合同文本
             contract_type: 合同类型
             review_focus: 审查重点
+            contract_name: 合同名称
 
         Returns:
             审查结果
@@ -251,6 +253,20 @@ class TaskManager:
             "contract_type": contract_type,
             "review_focus": review_focus or [],
         })
+
+        # 保存到长期记忆
+        try:
+            from src.memory.long_term_memory import get_long_term_memory
+            memory = get_long_term_memory()
+            memory.save_review_memory(
+                contract_name=contract_name,
+                contract_text=contract_text,
+                result=result,
+            )
+            logger.info(f"已保存审查记忆: {contract_name}")
+        except Exception as e:
+            logger.warning(f"保存审查记忆失败: {e}")
+
         return result
 
     async def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
