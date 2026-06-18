@@ -8,8 +8,6 @@ import asyncio
 import logging
 from datetime import datetime
 
-from langchain_core.messages import HumanMessage, SystemMessage
-
 from .base_agent import BaseAgent
 from src.utils.llm_response import extract_llm_content, parse_json_from_llm
 
@@ -44,6 +42,14 @@ class DocumentParserAgent(BaseAgent):
         max_retries: int = 3,
         **kwargs
     ):
+        # 参数验证
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        if chunk_overlap < 0:
+            raise ValueError("chunk_overlap must be non-negative")
+        if chunk_overlap >= chunk_size:
+            raise ValueError("chunk_overlap must be less than chunk_size")
+
         super().__init__(
             agent_id=agent_id,
             name=name,
@@ -55,7 +61,10 @@ class DocumentParserAgent(BaseAgent):
         self.chunk_overlap = chunk_overlap
         self.max_retries = max_retries
 
-        logger.info(f"文档解析Agent初始化完成: {name}")
+        # 设置初始状态
+        self.set_running(False)
+
+        logger.info(f"文档解析Agent初始化完成: {name}, chunk_size={chunk_size}")
 
     async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -75,33 +84,41 @@ class DocumentParserAgent(BaseAgent):
         if not contract_text:
             return {"error": "合同文本为空"}
 
-        logger.info(f"开始解析合同，文本长度: {len(contract_text)}")
+        # 更新状态
+        self.set_running(True)
+        self.update_activity()
 
-        # 单次LLM调用提取所有信息
-        extraction_result = await self._extract_all_info(contract_text, specified_type)
+        try:
+            logger.info(f"开始解析合同，文本长度: {len(contract_text)}")
 
-        if "error" in extraction_result:
-            return extraction_result
+            # 单次LLM调用提取所有信息
+            extraction_result = await self._extract_all_info(contract_text, specified_type)
 
-        # 标准化处理
-        standardized = self._standardize_result(extraction_result)
+            if "error" in extraction_result:
+                return extraction_result
 
-        result = {
-            "document_info": {
-                "contract_type": standardized["contract_type"],
-                "basic_info": standardized["basic_info"],
-                "sections_count": len(standardized["sections"]),
-                "text_length": len(contract_text),
-            },
-            "sections": standardized["sections"],
-            "dates": standardized["dates"],
-            "amounts": standardized["amounts"],
-            "parties": standardized["basic_info"].get("parties", []),
-            "definitions": standardized.get("definitions", []),
-        }
+            # 标准化处理
+            standardized = self._standardize_result(extraction_result)
 
-        logger.info(f"合同解析完成，类型: {standardized['contract_type']}，条款数: {len(standardized['sections'])}")
-        return result
+            result = {
+                "document_info": {
+                    "contract_type": standardized["contract_type"],
+                    "basic_info": standardized["basic_info"],
+                    "sections_count": len(standardized["sections"]),
+                    "text_length": len(contract_text),
+                },
+                "sections": standardized["sections"],
+                "dates": standardized["dates"],
+                "amounts": standardized["amounts"],
+                "parties": standardized["basic_info"].get("parties", []),
+                "definitions": standardized.get("definitions", []),
+            }
+
+            logger.info(f"合同解析完成，类型: {standardized['contract_type']}，条款数: {len(standardized['sections'])}")
+            return result
+        finally:
+            # 确保状态被重置
+            self.set_running(False)
 
     async def _extract_all_info(self, text: str, specified_type: str = None) -> Dict[str, Any]:
         """
@@ -175,27 +192,24 @@ class DocumentParserAgent(BaseAgent):
 5. 如果信息缺失，使用null或空数组
 6. 只输出JSON，不要其他内容"""
 
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=f"请提取以下合同的所有信息：\n\n{text}")
-        ]
+        user_message = f"请提取以下合同的所有信息：\n\n{text}"
 
-        try:
-            # 异步调用LLM
-            response = await self.llm.ainvoke(messages)
-            content = extract_llm_content(response.content)
+        # 带重试的LLM调用
+        for attempt in range(self.max_retries):
+            try:
+                content = await self.chat(user_message, system_prompt)
 
-            # 容错JSON解析
-            result = parse_json_from_llm(content)
+                # 容错JSON解析
+                result = parse_json_from_llm(content)
 
-            if isinstance(result, dict):
-                return result
-            else:
-                return {"error": "LLM返回格式错误"}
+                if isinstance(result, dict) and "error" not in result:
+                    return result
 
-        except Exception as e:
-            logger.error(f"LLM提取失败: {e}")
-            return {"error": str(e)}
+                logger.warning(f"尝试 {attempt + 1}/{self.max_retries} 失败，重试...")
+            except Exception as e:
+                logger.warning(f"尝试 {attempt + 1}/{self.max_retries} 异常: {e}")
+
+        return {"error": f"达到最大重试次数 {self.max_retries}"}
 
     async def _map_reduce_extract(self, text: str, specified_type: str = None) -> Dict[str, Any]:
         """
@@ -315,15 +329,10 @@ class DocumentParserAgent(BaseAgent):
 2. 金额统一为数值（元）
 3. 只输出JSON"""
 
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=f"请提取以下合同片段的信息：\n\n{chunk}")
-        ]
+        user_message = f"请提取以下合同片段的信息：\n\n{chunk}"
 
         try:
-            response = await self.llm.ainvoke(messages)
-            content = extract_llm_content(response.content)
-
+            content = await self.chat(user_message, system_prompt)
             return parse_json_from_llm(content)
         except Exception as e:
             logger.warning(f"块{chunk_index}提取失败: {e}")

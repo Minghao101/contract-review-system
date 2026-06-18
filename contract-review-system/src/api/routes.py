@@ -3,6 +3,7 @@ API路由模块
 """
 from typing import Optional
 from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .task_manager import get_task_manager
@@ -20,6 +21,7 @@ class ContractReviewRequest(BaseModel):
     contract_type: Optional[str] = Field(default="general", description="合同类型")
     review_focus: Optional[list] = Field(default=[], description="审查重点")
     callback_url: Optional[str] = Field(default=None, description="回调URL")
+    contract_name: Optional[str] = Field(default="未命名合同", description="合同名称")
 
 
 class TaskResponse(BaseModel):
@@ -82,10 +84,139 @@ async def submit_review_sync(request: ContractReviewRequest):
             contract_text=request.contract_text,
             contract_type=request.contract_type,
             review_focus=request.review_focus,
+            contract_name=request.contract_name,
         )
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/review/stream")
+async def review_stream(request: ContractReviewRequest):
+    """
+    流式合同审查（SSE）
+
+    先处理完所有Agent，然后流式返回格式化结果
+    """
+    import queue
+    import threading
+
+    q = queue.Queue()
+
+    def producer():
+        try:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(
+                    task_manager.process_sync(
+                        contract_text=request.contract_text,
+                        contract_type=request.contract_type,
+                        review_focus=request.review_focus,
+                    )
+                )
+            finally:
+                loop.close()
+
+            # 格式化结果
+            formatted = _format_stream_result(result, request.review_focus)
+            # 分块发送
+            chunk_size = 50
+            for i in range(0, len(formatted), chunk_size):
+                q.put(formatted[i:i + chunk_size])
+        except Exception as e:
+            q.put(f"\n\n错误: {str(e)}")
+        finally:
+            q.put(None)  # 结束信号
+
+    def stream_generator():
+        while True:
+            try:
+                chunk = q.get(timeout=30)
+                if chunk is None:
+                    break
+                yield chunk
+            except queue.Empty:
+                break
+
+    thread = threading.Thread(target=producer, daemon=True)
+    thread.start()
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+def _format_stream_result(result: dict, review_focus: list = None) -> str:
+    """将审查结果格式化为流式文本"""
+    lines = []
+    focus = review_focus[0] if review_focus else "合同审查"
+    lines.append(f"针对您的问题「{focus}」，以下是分析结果：\n")
+
+    if result.get("document_info"):
+        info = result["document_info"]
+        if info.get("contract_type"):
+            lines.append(f"**合同类型**: {info['contract_type']}")
+        if info.get("basic_info"):
+            bi = info["basic_info"]
+            if bi.get("parties"):
+                lines.append(f"**当事方**: {', '.join(str(p) for p in bi['parties'])}")
+        lines.append("")
+
+    if result.get("risks"):
+        lines.append("### ⚠️ 风险评估")
+        for r in result["risks"]:
+            if isinstance(r, dict):
+                level = r.get("level", r.get("severity", "medium"))
+                emoji = {"high": "🔴", "critical": "🔴", "medium": "🟡", "low": "🟢"}.get(level, "⚪")
+                title = r.get("title", r.get("name", "风险"))
+                desc = str(r.get("description", ""))[:150]
+                lines.append(f"- {emoji} **{title}**: {desc}")
+        lines.append("")
+
+    if result.get("compliance_violations"):
+        lines.append("### ✅ 合规问题")
+        for v in result["compliance_violations"]:
+            desc = v.get("description", v.get("issue", str(v))) if isinstance(v, dict) else str(v)
+            lines.append(f"- ⚠️ {desc}")
+        lines.append("")
+
+    if result.get("missing_clauses"):
+        lines.append("### 📋 缺失条款")
+        for c in result["missing_clauses"]:
+            lines.append(f"- ❌ {c}")
+        lines.append("")
+
+    if result.get("summary"):
+        summary = result["summary"]
+        lines.append("### 📊 综合摘要")
+        if isinstance(summary, str):
+            lines.append(summary)
+        elif isinstance(summary, dict):
+            text = summary.get("text") or summary.get("content") or ""
+            if text:
+                lines.append(text)
+        lines.append("")
+
+    if result.get("recommendations"):
+        lines.append("### 💡 建议")
+        for rec in result["recommendations"]:
+            if isinstance(rec, str):
+                lines.append(f"- {rec}")
+            elif isinstance(rec, dict):
+                lines.append(f"- {rec.get('title', rec.get('description', str(rec)))}")
+
+    if len(lines) <= 1:
+        lines.append("分析完成，但未找到相关信息。")
+
+    return "\n".join(lines)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)

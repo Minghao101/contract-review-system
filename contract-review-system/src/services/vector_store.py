@@ -4,7 +4,7 @@ Qdrant向量存储服务 - 法规和案例的向量检索
 import os
 import logging
 from typing import Any, Dict, List, Optional
-from sentence_transformers import SentenceTransformer
+import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -18,9 +18,6 @@ from qdrant_client.models import (
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
-
-# 设置HuggingFace镜像（国内加速）
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 
 class QdrantVectorStore:
@@ -36,26 +33,34 @@ class QdrantVectorStore:
 
     def __init__(self):
         try:
-            # 尝试连接远程Qdrant
             self.client = QdrantClient(url=settings.QDRANT_URL, timeout=3)
             self.client.get_collections()
             logger.info(f"已连接Qdrant: {settings.QDRANT_URL}")
         except Exception:
-            # 连接失败，使用内存模式
             logger.info("Qdrant不可用，使用内存模式")
             self.client = QdrantClient(":memory:")
-        self._embedding_model = None
+        self._http_client = httpx.Client(timeout=30)
 
-    @property
-    def embedding_model(self) -> SentenceTransformer:
-        """延迟加载embedding模型"""
-        if self._embedding_model is None:
-            logger.info(f"加载embedding模型: {settings.EMBEDDING_MODEL}")
-            self._embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
-        return self._embedding_model
+    def _encode(self, texts: List[str]) -> List[List[float]]:
+        """调用远程Embedding API获取向量"""
+        resp = self._http_client.post(
+            settings.EMBEDDING_URL,
+            json={"model": settings.EMBEDDING_MODEL, "input": texts},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # 兼容 Ollama 格式: {"embeddings": [[...], ...]}
+        if "embeddings" in data:
+            return data["embeddings"]
+        # 兼容 OpenAI 格式: {"data": [{"embedding": [...]}]}
+        if "data" in data:
+            return [item["embedding"] for item in data["data"]]
+        raise ValueError(f"未知的embedding响应格式: {list(data.keys())}")
 
-    def _ensure_collection(self, collection_name: str, dimension: int = 384):
+    def _ensure_collection(self, collection_name: str, dimension: int = None):
         """确保集合存在"""
+        if dimension is None:
+            dimension = settings.EMBEDDING_VECTOR_SIZE
         try:
             collections = self.client.get_collections().collections
             existing = [c.name for c in collections]
@@ -92,14 +97,14 @@ class QdrantVectorStore:
             return
 
         # 批量编码
-        embeddings = self.embedding_model.encode(texts, show_progress_bar=False)
+        embeddings = self._encode(texts)
 
         # 构造点
         points = []
         for i, (doc, embedding) in enumerate(zip(documents, embeddings)):
             point = PointStruct(
                 id=i + 1,
-                vector=embedding.tolist(),
+                vector=embedding if isinstance(embedding, list) else embedding.tolist(),
                 payload={**doc, "text": texts[i]},
             )
             points.append(point)
@@ -130,7 +135,7 @@ class QdrantVectorStore:
         Returns:
             搜索结果列表
         """
-        query_vector = self.embedding_model.encode([query])[0].tolist()
+        query_vector = self._encode([query])[0]
 
         # 构造过滤条件
         must_conditions = []

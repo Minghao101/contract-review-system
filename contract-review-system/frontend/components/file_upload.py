@@ -14,7 +14,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-API_BASE_URL = "http://localhost:8000/api/v1"
+API_BASE_URL = "http://localhost:8001/api/v1"
 
 
 def render_file_upload():
@@ -120,7 +120,7 @@ def _upload_and_review(uploaded_file):
             st.error(
                 "❌ 无法连接到后端服务\n\n"
                 "请在另一个终端启动FastAPI服务：\n"
-                "```\n.venv\\Scripts\\python.exe -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000\n```"
+                "```\n.venv\\Scripts\\python.exe -m uvicorn src.api.main:app --host 0.0.0.0 --port 8001\n```"
             )
         except Exception as e:
             logger.error(f"审查失败: {e}", exc_info=True)
@@ -169,7 +169,7 @@ def _review_text(contract_text: str):
             st.error(
                 "❌ 无法连接到后端服务\n\n"
                 "请在另一个终端启动FastAPI服务：\n"
-                "```\n.venv\\Scripts\\python.exe -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000\n```"
+                "```\n.venv\\Scripts\\python.exe -m uvicorn src.api.main:app --host 0.0.0.0 --port 8001\n```"
             )
         except Exception as e:
             logger.error(f"审查失败: {e}", exc_info=True)

@@ -6,9 +6,7 @@ import re
 import json
 import logging
 
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from src.utils.llm_response import extract_llm_content, parse_json_from_llm
+from src.utils.llm_response import parse_json_from_llm
 
 from .base_agent import BaseAgent
 
@@ -136,14 +134,10 @@ class RiskAssessmentAgent(BaseAgent):
 3. 建议要按优先级排序
 4. 只输出JSON，不要其他内容"""
 
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=f"请对以下合同进行风险评估：\n\n{text[:8000]}")
-        ]
+        user_message = f"请对以下合同进行风险评估：\n\n{text[:8000]}"
 
         try:
-            response = await self.llm.ainvoke(messages)
-            content = extract_llm_content(response.content)
+            content = await self.chat(user_message, system_prompt)
 
             result = parse_json_from_llm(content)
 

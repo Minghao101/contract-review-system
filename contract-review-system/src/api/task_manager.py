@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 import logging
 
-from src.agents.coordinator_agent import CoordinatorAgent
+from src.agents.multi_turn_handler import MultiTurnHandler
 from src.agents import (
     DocumentParserAgent,
     ClauseAnalysisAgent,
@@ -109,19 +109,19 @@ class TaskManager:
         """
         self.rabbitmq_url = rabbitmq_url or get_rabbitmq_url()
         self.persistence = TaskPersistence()
-        self._coordinator = None
-        self._init_coordinator()
+        self._handler = None
+        self._init_handler()
 
-    def _init_coordinator(self):
-        """初始化协调器和Agent"""
-        self._coordinator = CoordinatorAgent()
+    def _init_handler(self):
+        """初始化MultiTurnHandler和Agent"""
+        self._handler = MultiTurnHandler()
 
-        # 注册Agent
-        self._coordinator.register_agent(DocumentParserAgent())
-        self._coordinator.register_agent(ClauseAnalysisAgent())
-        self._coordinator.register_agent(RiskAssessmentAgent())
-        self._coordinator.register_agent(ComplianceCheckerAgent())
-        self._coordinator.register_agent(ReportGeneratorAgent())
+        # 注册Agent（直接执行）
+        self._handler.register_agent(DocumentParserAgent())
+        self._handler.register_agent(ClauseAnalysisAgent())
+        self._handler.register_agent(RiskAssessmentAgent())
+        self._handler.register_agent(ComplianceCheckerAgent())
+        self._handler.register_agent(ReportGeneratorAgent())
 
     async def submit_task(
         self,
@@ -217,11 +217,13 @@ class TaskManager:
         self.persistence.update_task_status(task_id, "processing")
 
         try:
-            result = await self._coordinator.process({
-                "contract_text": message["contract_text"],
-                "contract_type": message.get("contract_type", "general"),
-                "review_focus": message.get("review_focus", []),
-            })
+            # 使用MultiTurnHandler直接执行Agent
+            result = await self._handler.handle_message(
+                session_id=task_id,
+                user_message="审查合同",
+                contract_text=message["contract_text"],
+                file_info={"contract_type": message.get("contract_type", "general")}
+            )
 
             self.persistence.update_task_status(task_id, "completed", result=result)
 
@@ -246,13 +248,18 @@ class TaskManager:
             contract_name: 合同名称
 
         Returns:
-            审查结果
+            审查结果（扁平化，前端可直接使用顶层key）
         """
-        result = await self._coordinator.process({
-            "contract_text": contract_text,
-            "contract_type": contract_type,
-            "review_focus": review_focus or [],
-        })
+        # 使用MultiTurnHandler直接执行Agent
+        handler_result = await self._handler.handle_message(
+            session_id=f"sync_{contract_name}",
+            user_message="审查合同",
+            contract_text=contract_text,
+            file_info={"contract_type": contract_type}
+        )
+
+        # 扁平化结果：将各agent的result合并到顶层
+        flat_result = self._flatten_agent_results(handler_result)
 
         # 保存到长期记忆
         try:
@@ -261,13 +268,37 @@ class TaskManager:
             memory.save_review_memory(
                 contract_name=contract_name,
                 contract_text=contract_text,
-                result=result,
+                result=flat_result,
             )
             logger.info(f"已保存审查记忆: {contract_name}")
         except Exception as e:
             logger.warning(f"保存审查记忆失败: {e}")
 
-        return result
+        return flat_result
+
+    def _flatten_agent_results(self, handler_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        将MultiTurnHandler的嵌套结果扁平化为前端可直接使用的格式
+
+        MultiTurnHandler返回: {agent_name: {status, result: {actual_data}}}
+        扁平化后返回: {actual_data_keys...}
+        """
+        agent_results = handler_result.get("result", {})
+        flat = {}
+
+        # 提取各agent的实际结果
+        for agent_name, agent_data in agent_results.items():
+            if isinstance(agent_data, dict) and agent_data.get("status") == "completed":
+                actual = agent_data.get("result", {})
+                if isinstance(actual, dict):
+                    flat.update(actual)
+
+        # 保留元信息
+        flat["status"] = handler_result.get("intent", {}).get("type", "contract_review")
+        if handler_result.get("response"):
+            flat["response"] = handler_result["response"]
+
+        return flat
 
     async def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         """获取任务状态（从持久化存储）"""

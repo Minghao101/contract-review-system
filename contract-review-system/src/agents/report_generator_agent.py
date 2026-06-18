@@ -7,9 +7,7 @@ import re
 import json
 import logging
 
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from src.utils.llm_response import extract_llm_content, parse_json_from_llm
+from src.utils.llm_response import parse_json_from_llm
 
 from .base_agent import BaseAgent
 
@@ -147,19 +145,13 @@ class ReportGeneratorAgent(BaseAgent):
 5. 结论要明确
 6. 只输出JSON，不要其他内容"""
 
-        human_prompt = f"""分析结果上下文：
+        user_message = f"""分析结果上下文：
 {json.dumps(context, ensure_ascii=False, default=str)[:6000]}
 
 请根据以上分析结果生成完整的审查报告，只输出JSON。"""
 
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=human_prompt)
-        ]
-
         try:
-            response = await self.llm.ainvoke(messages)
-            content = extract_llm_content(response.content)
+            content = await self.chat(user_message, system_prompt)
 
             result = parse_json_from_llm(content)
 

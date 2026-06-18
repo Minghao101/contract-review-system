@@ -1,5 +1,7 @@
 """
-侧边栏组件 - 系统信息、设置、Agent状态
+侧边栏组件 - 豆包风格
+
+深色侧边栏 + 会话历史 + 新建对话
 """
 import sys
 from pathlib import Path
@@ -11,88 +13,219 @@ import streamlit as st
 
 
 def render_sidebar():
-    """渲染侧边栏"""
+    """渲染豆包风格侧边栏"""
     with st.sidebar:
-        st.header("📋 智能合同审查")
-
-        st.markdown("---")
-
-        # 系统信息
-        st.subheader("ℹ️ 系统信息")
+        # 顶部 Logo + 标题
         st.markdown("""
-        - **版本**: v1.0.0
-        - **框架**: LangChain + LangGraph
-        - **模型**: MIMO LLM
-        """)
+        <div style="text-align: center; padding: 16px 0 20px 0;">
+            <div style="font-size: 2rem; margin-bottom: 4px;">📋</div>
+            <div style="color: white; font-size: 1.1rem; font-weight: 600;">智能合同审查</div>
+            <div style="color: #888; font-size: 0.75rem; margin-top: 4px;">AI-Powered Contract Review</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # 新建对话按钮
+        if st.button("✨ 新建对话", use_container_width=True, key="new_chat"):
+            _new_conversation()
+
+        # 文件上传
+        _render_sidebar_upload()
 
         st.markdown("---")
 
-        # Agent状态
-        st.subheader("🤖 Agent状态")
-        agents = [
-            ("📄 文档解析", "DocumentParserAgent"),
-            ("📝 条款分析", "ClauseAnalysisAgent"),
-            ("⚠️ 风险评估", "RiskAssessmentAgent"),
-            ("✅ 合规检查", "ComplianceCheckerAgent"),
-            ("📊 报告生成", "ReportGeneratorAgent"),
-        ]
-
-        for display_name, agent_name in agents:
-            st.markdown(f"**{display_name}**")
-            st.caption(agent_name)
+        # 会话历史
+        _render_session_history()
 
         st.markdown("---")
 
         # 快速操作
-        st.subheader("⚡ 快速操作")
-        if st.button("🗑️ 清空对话历史", use_container_width=True):
-            st.session_state["messages"] = []
-            st.session_state["review_history"] = []
-            st.rerun()
-
-        if st.button("📥 下载示例合同", use_container_width=True):
-            _show_sample_contract()
+        _render_quick_actions()
 
         st.markdown("---")
 
-        # 帮助
-        st.subheader("❓ 使用帮助")
+        # 底部信息
+        _render_footer_info()
+
+
+def _new_conversation():
+    """新建对话"""
+    st.session_state["messages"] = []
+    st.session_state["uploaded_file_content"] = None
+    st.session_state["uploaded_file_name"] = None
+    st.session_state["review_result"] = None
+    st.session_state["_displayed_indices"] = set()
+    st.rerun()
+
+
+def _render_sidebar_upload():
+    """渲染侧边栏文件上传"""
+    # 如果已上传文件，显示文件信息
+    if st.session_state.get("uploaded_file_name"):
+        st.markdown(f"""
+        <div style="background: rgba(79,70,229,0.15); border-radius: 8px; padding: 8px 12px;
+                    margin: 8px 0; font-size: 0.85rem; color: #e0e0e0;">
+            📎 {st.session_state['uploaded_file_name'][:25]}
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("🗑️ 清除文件", use_container_width=True, key="sidebar_clear_file"):
+            st.session_state["uploaded_file_content"] = None
+            st.session_state["uploaded_file_name"] = None
+            st.rerun()
+    else:
+        uploaded_file = st.file_uploader(
+            "📎 上传合同",
+            type=["txt", "pdf", "docx"],
+            help="支持 TXT、PDF、DOCX",
+            key="sidebar_file_uploader",
+            label_visibility="collapsed"
+        )
+        if uploaded_file is not None:
+            # 读取文件
+            try:
+                if uploaded_file.name.endswith(".txt"):
+                    content = uploaded_file.read().decode("utf-8")
+                elif uploaded_file.name.endswith(".pdf"):
+                    import PyPDF2, io
+                    pdf = PyPDF2.PdfReader(io.BytesIO(uploaded_file.read()))
+                    content = "\n".join(p.extract_text() for p in pdf.pages)
+                elif uploaded_file.name.endswith(".docx"):
+                    import docx, io
+                    doc = docx.Document(io.BytesIO(uploaded_file.read()))
+                    content = "\n".join(p.text for p in doc.paragraphs)
+                else:
+                    content = None
+
+                if content:
+                    st.session_state["uploaded_file_content"] = content
+                    st.session_state["uploaded_file_name"] = uploaded_file.name
+                    st.rerun()
+                else:
+                    st.error("文件读取失败")
+            except Exception as e:
+                st.error(f"读取错误: {e}")
+
+
+def _render_session_history():
+    """渲染会话历史列表"""
+    st.markdown("### 📝 对话历史")
+
+    history = st.session_state.get("review_history", [])
+
+    if not history:
         st.markdown("""
-        1. 在对话框输入合同文本或上传文件
-        2. 系统将自动进行多维度审查
-        3. 查看审查报告和风险分析
-        """)
+        <div style="color: #888; font-size: 0.85rem; padding: 8px 0; text-align: center;">
+            暂无对话记录
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    # 显示最近 10 条
+    for i, record in enumerate(reversed(history[-10:])):
+        name = record.get("contract_name", "未命名合同")
+        ts = record.get("timestamp", "")
+        status = record.get("status", "unknown")
+
+        # 状态图标
+        status_icon = {"completed": "✅", "failed": "❌"}.get(status, "❓")
+
+        # 简短时间
+        short_time = ts.split(" ")[-1][:5] if " " in ts else ts[:5]
+
+        # 使用按钮模拟历史项
+        label = f"{status_icon} {name[:20]}"
+        if st.button(label, key=f"hist_{i}", use_container_width=True):
+            _load_history_record(record)
 
 
-def _show_sample_contract():
-    """显示示例合同"""
-    sample = """
-技术服务合同
+def _load_history_record(record):
+    """加载历史记录"""
+    result = record.get("result", {})
+    question = record.get("question", "查看审查结果")
+    file_name = record.get("contract_name", "未命名合同")
 
-甲方：北京创新科技有限公司
-乙方：上海智慧软件有限公司
+    # 将历史记录的消息恢复到对话中
+    st.session_state["messages"] = [
+        {
+            "role": "user",
+            "content": question,
+            "timestamp": record.get("timestamp", "")[-8:]
+        },
+        {
+            "role": "assistant",
+            "content": f"📋 **{file_name}** 的审查结果\n\n"
+                       f"审查时间: {record.get('timestamp', 'N/A')}\n\n"
+                       f"状态: {record.get('status', 'unknown')}",
+            "timestamp": record.get("timestamp", "")[-8:]
+        }
+    ]
 
-第一条 合同标的
-乙方为甲方提供企业级ERP系统的技术开发服务。
+    if result:
+        from frontend.components.chat import _format_answer
+        answer = _format_answer(result, question, file_name)
+        st.session_state["messages"].append({
+            "role": "assistant",
+            "content": answer,
+            "timestamp": record.get("timestamp", "")[-8:]
+        })
 
-第二条 服务期限
-合同有效期自2024年4月1日至2024年12月31日。
+    st.rerun()
 
-第三条 服务费用及支付
-3.1 服务总费用为人民币壹佰伍拾万元整（¥1,500,000.00）。
-3.2 甲方应在合同签订后5个工作日内支付30%预付款。
 
-第四条 知识产权
-4.1 本合同履行过程中产生的所有技术成果和知识产权归甲方所有。
+def _render_quick_actions():
+    """渲染快速操作"""
+    st.markdown("### ⚡ 快速操作")
 
-第五条 保密条款
-5.1 双方对本合同内容承担保密义务。
+    if st.button("🗑️ 清空对话", use_container_width=True, key="clear_all"):
+        _clear_all()
 
-第六条 违约责任
-6.1 如甲方违约，应承担无限责任。
+    if st.button("📥 导出记录", use_container_width=True, key="export"):
+        _export_history()
 
-第七条 争议解决
-如发生争议，由乙方所在地法院管辖。
-"""
-    st.session_state["sample_contract"] = sample
-    st.success("示例合同已加载，请在对话框中使用")
+
+def _clear_all():
+    """清空所有数据"""
+    st.session_state["messages"] = []
+    st.session_state["review_history"] = []
+    st.session_state["uploaded_file_content"] = None
+    st.session_state["uploaded_file_name"] = None
+    st.session_state["review_result"] = None
+    st.session_state["_displayed_indices"] = set()
+    st.rerun()
+
+
+def _export_history():
+    """导出历史记录"""
+    history = st.session_state.get("review_history", [])
+    if not history:
+        st.sidebar.info("暂无记录可导出")
+        return
+
+    import json
+    export_data = json.dumps(history, ensure_ascii=False, indent=2, default=str)
+    st.sidebar.download_button(
+        label="📥 下载 JSON",
+        data=export_data,
+        file_name="contract_review_history.json",
+        mime="application/json",
+        key="download_history"
+    )
+
+
+def _render_footer_info():
+    """渲染底部信息"""
+    st.markdown("""
+    <div style="color: #666; font-size: 0.75rem; padding: 8px 0; line-height: 1.6;">
+        <div style="margin-bottom: 4px;">
+            <span style="color: #888;">模型</span>
+            <span style="color: #aaa;">MIMO v2.5</span>
+        </div>
+        <div style="margin-bottom: 4px;">
+            <span style="color: #888;">版本</span>
+            <span style="color: #aaa;">v1.0.0</span>
+        </div>
+        <div>
+            <span style="color: #888;">框架</span>
+            <span style="color: #aaa;">LangChain + Streamlit</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)

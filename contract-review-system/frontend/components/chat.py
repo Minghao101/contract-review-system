@@ -1,8 +1,9 @@
 """
-对话界面组件 - 类豆包风格：上传文件 + 对话提问
+对话界面组件 - 豆包风格
 """
 import sys
 import logging
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -14,11 +15,11 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-API_BASE_URL = "http://localhost:8000/api/v1"
+API_BASE_URL = "http://localhost:8001/api/v1"
 
 
 def render_chat_interface():
-    """渲染对话界面"""
+    """渲染豆包风格聊天界面"""
     # 初始化 session state
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
@@ -28,132 +29,148 @@ def render_chat_interface():
         st.session_state["uploaded_file_name"] = None
     if "review_result" not in st.session_state:
         st.session_state["review_result"] = None
+    if "_displayed_indices" not in st.session_state:
+        st.session_state["_displayed_indices"] = set()
 
-    # 欢迎消息
+    # 每次脚本执行开始时清除已显示标记，确保消息正常渲染
+    # _displayed_indices 仅用于当前执行中防止流式输出/错误消息重复渲染
+    st.session_state["_displayed_indices"] = set()
+
+    # 页面标题
+    _render_header()
+
+    # 已上传文件提示
+    if st.session_state.get("uploaded_file_name"):
+        _render_file_banner()
+
+    # 消息列表
     if not st.session_state["messages"]:
-        st.session_state["messages"].append({
-            "role": "assistant",
-            "content": "👋 你好！我是智能合同审查助手。\n\n请上传合同文件（PDF/DOCX/TXT），我会先分析合同内容，然后你可以针对合同提问。",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-
-    # 渲染消息列表
-    for msg in st.session_state["messages"]:
-        _render_message(msg)
+        _render_welcome()
+    else:
+        _render_messages()
 
     # 输入区域
-    st.markdown("---")
+    _render_input_area()
 
-    # 文件上传（在输入框上方）
-    _render_file_upload_area()
 
-    # 对话输入
-    user_input = st.chat_input("上传文件后，在这里输入问题...")
+def _render_header():
+    """渲染页面标题"""
+    st.markdown("""
+    <div class="doubao-header">
+        <h1>📋 智能合同审查</h1>
+        <p>上传合同文件，AI 帮你分析风险、检查合规、生成报告</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def _render_welcome():
+    """渲染欢迎页面"""
+    st.markdown("""
+    <div class="welcome-card">
+        <h2>👋 你好，我是合同审查助手</h2>
+        <p>我可以帮你：</p>
+        <p>
+            <span class="feature-tag">📄 解析合同结构</span>
+            <span class="feature-tag">⚠️ 评估风险等级</span>
+            <span class="feature-tag">✅ 检查合规性</span>
+            <span class="feature-tag">📊 生成审查报告</span>
+        </p>
+        <p style="margin-top: 12px; font-size: 0.85rem; opacity: 0.8;">
+            👈 请在左侧侧边栏上传合同文件
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def _render_file_banner():
+    """渲染已上传文件提示"""
+    col1, col2 = st.columns([5, 1])
+    with col1:
+        st.info(f"📎 已上传: **{st.session_state['uploaded_file_name']}**")
+    with col2:
+        if st.button("✕", key="clear_file", help="清除文件"):
+            st.session_state["uploaded_file_content"] = None
+            st.session_state["uploaded_file_name"] = None
+            st.session_state["review_result"] = None
+            st.rerun()
+
+
+def _render_messages():
+    """渲染消息列表"""
+    # 获取已直接显示的消息索引（流式输出/错误提示已渲染的）
+    displayed_indices = st.session_state.get("_displayed_indices", set())
+
+    for idx, msg in enumerate(st.session_state["messages"]):
+        # 跳过已在当前脚本执行中直接显示的消息
+        if idx in displayed_indices:
+            continue
+
+        role = msg["role"]
+        content = msg["content"]
+        timestamp = msg.get("timestamp", "")
+
+        avatar = "🤖" if role == "assistant" else "👤"
+
+        with st.chat_message(role, avatar=avatar):
+            st.markdown(content)
+            if timestamp:
+                st.caption(f"🕐 {timestamp}")
+
+
+def _render_input_area():
+    """渲染底部输入区域"""
+    # 显示当前文件状态
+    if st.session_state.get("uploaded_file_name"):
+        st.caption(f"📎 当前文件: {st.session_state['uploaded_file_name']}")
+
+    # 聊天输入
+    user_input = st.chat_input("输入你的问题，例如：这个合同有什么风险？")
 
     if user_input:
         _handle_user_input(user_input)
 
 
-def _render_file_upload_area():
-    """渲染文件上传区域"""
-    # 如果已有文件，显示已上传状态
-    if st.session_state.get("uploaded_file_name"):
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.info(f"📎 已上传: **{st.session_state['uploaded_file_name']}**")
-        with col2:
-            if st.button("✕ 清除", key="clear_file"):
-                st.session_state["uploaded_file_content"] = None
-                st.session_state["uploaded_file_name"] = None
-                st.session_state["review_result"] = None
-                st.rerun()
-    else:
-        # 文件上传组件
-        uploaded_file = st.file_uploader(
-            "📎 上传合同文件",
-            type=["txt", "pdf", "docx"],
-            help="支持 TXT、PDF、DOCX 格式",
-            key="chat_file_uploader",
-            label_visibility="collapsed"
-        )
-
-        if uploaded_file is not None:
-            content = _read_uploaded_file(uploaded_file)
-            if content:
-                st.session_state["uploaded_file_content"] = content
-                st.session_state["uploaded_file_name"] = uploaded_file.name
-                st.success(f"✅ {uploaded_file.name} 上传成功（{len(content)} 字符）")
-                st.rerun()
-            else:
-                st.error("❌ 文件读取失败")
-
-
-def _read_uploaded_file(uploaded_file) -> str:
-    """读取上传的文件内容"""
-    try:
-        if uploaded_file.name.endswith(".txt"):
-            return uploaded_file.read().decode("utf-8")
-
-        elif uploaded_file.name.endswith(".pdf"):
-            import PyPDF2
-            import io
-            pdf_reader = PyPDF2.PdfReader(io.BytesIO(uploaded_file.read()))
-            return "\n".join(page.extract_text() for page in pdf_reader.pages)
-
-        elif uploaded_file.name.endswith(".docx"):
-            import docx
-            import io
-            doc = docx.Document(io.BytesIO(uploaded_file.read()))
-            return "\n".join(para.text for para in doc.paragraphs)
-
-        return None
-    except Exception as e:
-        st.error(f"文件读取错误: {e}")
-        return None
-
-
-def _render_message(msg: dict):
-    """渲染单条消息"""
-    role = msg["role"]
-    content = msg["content"]
-    timestamp = msg.get("timestamp", "")
-
-    with st.chat_message(role):
-        st.markdown(content)
-        if timestamp:
-            st.caption(f"🕐 {timestamp}")
-
-
 def _handle_user_input(user_input: str):
     """处理用户输入"""
-    # 添加用户消息
+    # 添加用户消息到 session state
     st.session_state["messages"].append({
         "role": "user",
         "content": user_input,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "timestamp": datetime.now().strftime("%H:%M:%S")
     })
+
+    # 立即显示用户消息（不等待 rerun）
+    with st.chat_message("user", avatar="👤"):
+        st.markdown(user_input)
+    # 标记用户消息已直接显示
+    user_idx = len(st.session_state["messages"]) - 1
+    st.session_state.setdefault("_displayed_indices", set()).add(user_idx)
 
     # 获取上传的文件内容
     contract_text = st.session_state.get("uploaded_file_content")
     file_name = st.session_state.get("uploaded_file_name", "未知文件")
 
-    # 特殊命令：查询历史记忆
+    # 特殊命令
     if user_input.strip() in ["查看历史", "历史记录", "查询记忆", "我的审查"]:
         _query_memory(user_input)
         st.rerun()
         return
 
     if not contract_text:
-        # 没有上传文件，提示用户
+        with st.chat_message("assistant", avatar="🤖"):
+            st.markdown("⚠️ 请先上传合同文件，然后我才能帮你分析。\n\n你也可以输入「查看历史」来查看之前的审查记录。")
         st.session_state["messages"].append({
             "role": "assistant",
             "content": "⚠️ 请先上传合同文件，然后我才能帮你分析。\n\n你也可以输入「查看历史」来查看之前的审查记录。",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "timestamp": datetime.now().strftime("%H:%M:%S")
         })
+        # 标记该消息已直接显示，避免 _render_messages 重复渲染
+        idx = len(st.session_state["messages"]) - 1
+        st.session_state.setdefault("_displayed_indices", set()).add(idx)
         st.rerun()
         return
 
-    # 有文件，调用后端分析
+    # 有文件，调用后端分析（流式输出）
     _process_with_backend(contract_text, user_input, file_name)
 
 
@@ -195,21 +212,22 @@ def _query_memory(query: str):
     st.session_state["messages"].append({
         "role": "assistant",
         "content": content,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "timestamp": datetime.now().strftime("%H:%M:%S")
     })
 
 
 def _process_with_backend(contract_text: str, question: str, file_name: str):
-    """调用后端处理"""
+    """调用后端处理 - 支持流式输出"""
+    # 先同步调用获取完整结果（用于历史记录保存）
     with st.spinner("🔄 正在分析..."):
         try:
-            # 调用同步审查接口，把问题作为 review_focus
             response = requests.post(
                 f"{API_BASE_URL}/review/sync",
                 json={
                     "contract_text": contract_text,
                     "contract_type": "general",
-                    "review_focus": [question]
+                    "review_focus": [question],
+                    "contract_name": file_name
                 },
                 timeout=300
             )
@@ -232,39 +250,79 @@ def _process_with_backend(contract_text: str, question: str, file_name: str):
                 # 格式化回答
                 answer = _format_answer(result, question, file_name)
 
-                st.session_state["messages"].append({
-                    "role": "assistant",
-                    "content": answer,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                })
+                # 流式输出 - 逐块显示
+                _stream_answer(answer)
+
+                return
             else:
+                error_msg = f"❌ 后端错误: {response.status_code}"
+                with st.chat_message("assistant", avatar="🤖"):
+                    st.markdown(error_msg)
                 st.session_state["messages"].append({
                     "role": "assistant",
-                    "content": f"❌ 后端错误: {response.status_code}",
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    "content": error_msg,
+                    "timestamp": datetime.now().strftime("%H:%M:%S")
                 })
+                idx = len(st.session_state["messages"]) - 1
+                st.session_state.setdefault("_displayed_indices", set()).add(idx)
 
         except requests.exceptions.ConnectionError:
+            error_msg = (
+                "❌ 无法连接到后端服务，请确认 FastAPI 已启动。\n\n"
+                "```\n.venv\\Scripts\\python.exe -m uvicorn src.api.main:app "
+                "--host 0.0.0.0 --port 8001\n```"
+            )
+            with st.chat_message("assistant", avatar="🤖"):
+                st.markdown(error_msg)
             st.session_state["messages"].append({
                 "role": "assistant",
-                "content": "❌ 无法连接到后端服务，请确认 FastAPI 已启动。\n\n```\n.venv\\Scripts\\python.exe -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000\n```",
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                "content": error_msg,
+                "timestamp": datetime.now().strftime("%H:%M:%S")
             })
+            idx = len(st.session_state["messages"]) - 1
+            st.session_state.setdefault("_displayed_indices", set()).add(idx)
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
             logger.error(f"处理失败: {e}\n{tb}")
+            error_msg = f"❌ 处理失败: {str(e)}\n\n```\n{tb[-500:]}\n```"
+            with st.chat_message("assistant", avatar="🤖"):
+                st.markdown(error_msg)
             st.session_state["messages"].append({
                 "role": "assistant",
-                "content": f"❌ 处理失败: {str(e)}\n\n```\n{tb[-500:]}\n```",
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                "content": error_msg,
+                "timestamp": datetime.now().strftime("%H:%M:%S")
             })
+            idx = len(st.session_state["messages"]) - 1
+            st.session_state.setdefault("_displayed_indices", set()).add(idx)
 
-    st.rerun()
+
+def _stream_answer(answer: str):
+    """将回答以流式方式逐块输出到聊天界面"""
+    def _text_generator():
+        """逐块生成文本，模拟流式输出"""
+        lines = answer.split("\n")
+        for i, line in enumerate(lines):
+            chunk = line + ("\n" if i < len(lines) - 1 else "")
+            yield chunk
+            time.sleep(0.02)
+
+    with st.chat_message("assistant", avatar="🤖"):
+        st.write_stream(_text_generator())
+
+    # 保存完整消息到 session state
+    st.session_state["messages"].append({
+        "role": "assistant",
+        "content": answer,
+        "timestamp": datetime.now().strftime("%H:%M:%S")
+    })
+    # 标记该消息已直接显示，避免 _render_messages 重复渲染
+    idx = len(st.session_state["messages"]) - 1
+    st.session_state.setdefault("_displayed_indices", set()).add(idx)
 
 
 def _to_str(item) -> str:
-    """安全转换为字符串，保证返回 str"""
+    """安全转换为字符串"""
     if isinstance(item, str):
         return item
     if isinstance(item, dict):
@@ -324,17 +382,14 @@ def _format_answer(result: dict, question: str, file_name: str) -> str:
         analysis = result["clause_analysis"]
         if isinstance(analysis, dict):
             lines.append("### 📝 条款分析")
-            # 总体评估
             if analysis.get("overall_assessment"):
                 lines.append(_to_str(analysis["overall_assessment"]))
             elif analysis.get("summary"):
                 lines.append(_to_str(analysis["summary"]))
-            # 统计信息
             if analysis.get("total_clauses"):
                 lines.append(f"- 条款总数: {analysis['total_clauses']}")
             if analysis.get("total_issues"):
                 lines.append(f"- 发现问题: {analysis['total_issues']}")
-            # 关键建议
             if analysis.get("key_recommendations"):
                 lines.append("")
                 lines.append("**关键建议:**")
@@ -368,3 +423,5 @@ def _format_answer(result: dict, question: str, file_name: str) -> str:
         lines.append("分析完成，但未找到相关信息。")
 
     return "\n".join(str(line) for line in lines)
+
+

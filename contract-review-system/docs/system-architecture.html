@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能合同审查系统 - 架构与代码逻辑说明</title>
+    <style>
+        :root {
+            --primary: #6366f1; --primary-light: #818cf8;
+            --success: #10b981; --warning: #f59e0b; --danger: #ef4444; --info: #3b82f6;
+            --bg: #0f172a; --bg-card: #1e293b; --bg-code: #0d1117;
+            --text: #e2e8f0; --text-muted: #94a3b8; --border: #334155;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+
+        .hero { background: linear-gradient(135deg, #1e1b4b, #312e81, #1e1b4b); padding: 70px 40px; text-align: center; position: relative; overflow: hidden; }
+        .hero::before { content: ''; position: absolute; inset: -50%; width: 200%; height: 200%; background: radial-gradient(circle at 30% 50%, rgba(99,102,241,.15), transparent 50%), radial-gradient(circle at 70% 50%, rgba(16,185,129,.1), transparent 50%); }
+        .hero .badge { display: inline-block; background: rgba(99,102,241,.2); border: 1px solid rgba(99,102,241,.4); color: var(--primary-light); padding: 4px 16px; border-radius: 20px; font-size: .85rem; margin-bottom: 20px; position: relative; }
+        .hero h1 { font-size: 2.8rem; font-weight: 800; background: linear-gradient(135deg, #c7d2fe, #a5b4fc, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; position: relative; margin-bottom: 12px; }
+        .hero p { font-size: 1.1rem; color: var(--text-muted); position: relative; max-width: 650px; margin: 0 auto; }
+
+        .container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+        section { padding: 56px 0; }
+        section h2 { font-size: 1.9rem; font-weight: 700; margin-bottom: 10px; color: #fff; }
+        section .sub { color: var(--text-muted); font-size: 1rem; margin-bottom: 36px; }
+        code { background: rgba(99,102,241,.15); padding: 2px 7px; border-radius: 4px; font-family: 'Consolas', monospace; font-size: .84em; color: #c7d2fe; }
+        strong { color: #fff; }
+
+        /* nav */
+        .toc { position: sticky; top: 0; z-index: 100; background: rgba(15,23,42,.95); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); padding: 12px 0; overflow-x: auto; }
+        .toc-inner { max-width: 1200px; margin: 0 auto; padding: 0 24px; display: flex; gap: 6px; flex-wrap: nowrap; }
+        .toc a { white-space: nowrap; padding: 5px 12px; border-radius: 6px; font-size: .8rem; color: var(--text-muted); text-decoration: none; transition: all .2s; }
+        .toc a:hover { background: rgba(99,102,241,.15); color: var(--primary-light); }
+
+        /* cards */
+        .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; margin: 28px 0; }
+        .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; transition: all .3s; }
+        .card:hover { border-color: var(--primary); box-shadow: 0 4px 20px rgba(99,102,241,.12); }
+        .card .ci { font-size: 1.8rem; margin-bottom: 10px; }
+        .card h3 { font-size: 1.05rem; font-weight: 600; margin-bottom: 6px; color: #fff; }
+        .card p { color: var(--text-muted); font-size: .86rem; }
+        .card ul { margin-top: 10px; padding-left: 18px; color: var(--text-muted); font-size: .84rem; }
+        .card ul li { margin-bottom: 3px; }
+
+        /* code block */
+        .cb { background: var(--bg-code); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin: 20px 0; }
+        .cb-h { background: var(--bg-card); padding: 10px 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
+        .cb-h .fn { font-size: .84rem; color: var(--text-muted); font-family: 'Consolas', monospace; }
+        .cb-h .dots { display: flex; gap: 6px; }
+        .cb-h .d { width: 10px; height: 10px; border-radius: 50%; }
+        .cb-h .d:nth-child(1) { background: #ef4444; } .cb-h .d:nth-child(2) { background: #f59e0b; } .cb-h .d:nth-child(3) { background: #10b981; }
+        .cb-c { padding: 18px; overflow-x: auto; font-family: 'Consolas','Fira Code',monospace; font-size: .82rem; line-height: 1.65; color: #e6edf3; }
+        .kw { color: #ff7b72; } .fn2 { color: #d2a8ff; } .st { color: #a5d6ff; }
+        .cm { color: #8b949e; } .cl { color: #79c0ff; } .vr { color: #ffa657; }
+
+        /* explanation box */
+        .explain { background: rgba(99,102,241,.06); border-left: 3px solid var(--primary); padding: 14px 18px; border-radius: 0 8px 8px 0; margin: 16px 0; font-size: .88rem; color: var(--text-muted); }
+        .explain strong { color: var(--primary-light); }
+
+        /* table */
+        .tb { width: 100%; border-collapse: separate; border-spacing: 0; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); margin: 28px 0; }
+        .tb th { background: var(--bg-card); padding: 12px 18px; text-align: left; font-weight: 600; color: #fff; border-bottom: 2px solid var(--border); font-size: .88rem; }
+        .tb td { padding: 10px 18px; border-bottom: 1px solid var(--border); font-size: .86rem; }
+        .tb tr:last-child td { border-bottom: none; }
+        .tb tr:hover td { background: rgba(99,102,241,.04); }
+
+        /* arch flow */
+        .arch-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 36px; margin: 28px 0; position: relative; overflow: hidden; }
+        .arch-box::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, var(--primary), var(--success), var(--warning)); }
+        .arch-t { font-size: 1.05rem; font-weight: 600; color: var(--primary-light); margin-bottom: 22px; text-align: center; }
+        .flow { display: flex; align-items: center; justify-content: center; gap: 0; flex-wrap: wrap; padding: 8px 0; }
+        .fn3 { background: var(--bg); border: 2px solid var(--border); border-radius: 12px; padding: 12px 16px; text-align: center; min-width: 110px; transition: all .3s; }
+        .fn3:hover { border-color: var(--primary); box-shadow: 0 0 16px rgba(99,102,241,.2); transform: translateY(-2px); }
+        .fn3 .ic { font-size: 1.5rem; margin-bottom: 3px; } .fn3 .lb { font-weight: 600; font-size: .82rem; color: #fff; } .fn3 .ds { font-size: .7rem; color: var(--text-muted); margin-top: 2px; }
+        .fn3.user { border-color: var(--info); background: rgba(59,130,246,.08); }
+        .fn3.api { border-color: var(--success); background: rgba(16,185,129,.06); }
+        .fn3.core { border-color: var(--primary); background: rgba(99,102,241,.06); }
+        .fn3.agent { border-color: var(--warning); background: rgba(245,158,11,.05); }
+        .fn3.infra { border-color: #8b5cf6; background: rgba(139,92,246,.06); }
+        .fa { color: var(--text-muted); font-size: 1.3rem; padding: 0 5px; flex-shrink: 0; }
+        .layer { margin: 14px 0; } .layer-lb { font-size: .72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+        .layer-ns { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+
+        /* coord flow */
+        .cf { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 24px 0; }
+        .cr { display: flex; align-items: center; gap: 10px; }
+        .cb2 { padding: 10px 20px; border-radius: 10px; font-weight: 600; font-size: .86rem; text-align: center; min-width: 130px; }
+        .cb2.b { background: rgba(59,130,246,.15); border: 1px solid var(--info); color: #93c5fd; }
+        .cb2.p { background: rgba(99,102,241,.15); border: 1px solid var(--primary); color: #c7d2fe; }
+        .cb2.g { background: rgba(16,185,129,.15); border: 1px solid var(--success); color: #6ee7b7; }
+        .cb2.o { background: rgba(245,158,11,.15); border: 1px solid var(--warning); color: #fcd34d; }
+        .ca { color: var(--text-muted); font-size: 1.1rem; }
+        .clb { font-size: .73rem; color: var(--text-muted); text-align: center; }
+        .cpar { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+        .cpar .cb2 { min-width: 100px; font-size: .8rem; padding: 8px 12px; }
+
+        /* memory */
+        .mg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 18px 0; }
+        .mc { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 22px; text-align: center; }
+        .mc .mi { font-size: 2rem; margin-bottom: 8px; } .mc h4 { font-size: .95rem; color: #fff; margin-bottom: 5px; } .mc p { font-size: .8rem; color: var(--text-muted); }
+
+        footer { text-align: center; padding: 36px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: .84rem; }
+        @media (max-width: 768px) { .hero h1 { font-size: 1.8rem; } .flow { flex-direction: column; } .fa { transform: rotate(90deg); } .mg { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+
+<header class="hero">
+    <div class="badge">Architecture & Code Logic v3.0</div>
+    <h1>智能合同审查系统</h1>
+    <p>LangChain + 多 Agent 协作 + LLM 动态规划 &mdash; 完整架构与代码逻辑说明</p>
+</header>
+
+<nav class="toc">
+    <div class="toc-inner">
+        <a href="#langchain">LangChain 是什么</a>
+        <a href="#arch">系统架构</a>
+        <a href="#llm-factory">LLM 工厂</a>
+        <a href="#base-agent">BaseAgent 基类</a>
+        <a href="#coordinator">CoordinatorAgent</a>
+        <a href="#doc-parser">文档解析 Agent</a>
+        <a href="#risk">风险评估 Agent</a>
+        <a href="#compliance">合规检查 Agent</a>
+        <a href="#report">报告生成 Agent</a>
+        <a href="#multi-turn">多轮对话</a>
+        <a href="#communication">通信机制</a>
+        <a href="#vector">向量数据库</a>
+        <a href="#memory">记忆系统</a>
+        <a href="#api">API 接口</a>
+        <a href="#files">文件结构</a>
+    </div>
+</nav>
+
+<!-- ==================== 1. LangChain 是什么 ==================== -->
+<section id="langchain">
+    <div class="container">
+        <h2>1. LangChain 是什么</h2>
+        <p class="sub">本项目使用 LangChain 生态的核心组件来构建 AI Agent 应用</p>
+
+        <div class="card-grid">
+            <div class="card">
+                <div class="ci">LangChain Core</div>
+                <h3>langchain-core</h3>
+                <p>提供基础抽象层，本项目用到的：</p>
+                <ul>
+                    <li><code>BaseLLM</code> &mdash; 所有 LLM 的抽象基类</li>
+                    <li><code>SystemMessage / HumanMessage</code> &mdash; 消息格式化</li>
+                    <li><code>@tool</code> &mdash; LangChain Tool 装饰器</li>
+                    <li><code>BaseChatModel.ainvoke()</code> &mdash; 异步调用 LLM</li>
+                </ul>
+            </div>
+            <div class="card">
+                <div class="ci">LangChain OpenAI</div>
+                <h3>langchain-openai</h3>
+                <p>OpenAI 兼容接口封装。本项目通过 <code>ChatOpenAI</code> 调用任何 OpenAI 兼容的 API（如 MIMO 的 Anthropic 接口）。</p>
+            </div>
+            <div class="card">
+                <div class="ci">LangChain Anthropic</div>
+                <h3>langchain-anthropic</h3>
+                <p><code>ChatAnthropic</code> &mdash; 原生 Anthropic Claude 集成。当前配置使用此接口调用 MIMO 模型。</p>
+            </div>
+            <div class="card">
+                <div class="ci">LangChain Community</div>
+                <h3>langchain-community</h3>
+                <p>社区集成，本项目使用 <code>Ollama</code> LLM 连接器（本地模型回退方案）。</p>
+            </div>
+        </div>
+
+        <div class="explain">
+            <strong>本项目怎么用 LangChain？</strong><br>
+            项目<strong>没有</strong>用 LangChain 的 Agent/Chain/AgentExecutor 高层抽象，而是：
+            1) 用 <code>ChatAnthropic / ChatOpenAI / Ollama</code> 作为 LLM 调用层 &rarr; 统一接口
+            2) 用 <code>SystemMessage + HumanMessage</code> 构建 prompt &rarr; 发送给 LLM
+            3) 用 <code>self.llm.ainvoke(messages)</code> 异步调用 &rarr; 获取结构化输出
+            4) 所有 Agent 调度、并行、路由逻辑<strong>全部手写</strong>在 CoordinatorAgent 中
+        </div>
+
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">llm_factory.py &mdash; LangChain LLM 创建</span></div>
+            <div class="cb-c">
+<span class="kw">from</span> langchain_core.language_models <span class="kw">import</span> BaseLLM
+<span class="kw">from</span> langchain_community.llms <span class="kw">import</span> Ollama
+<span class="kw">from</span> langchain_openai <span class="kw">import</span> ChatOpenAI
+<span class="kw">from</span> langchain_anthropic <span class="kw">import</span> ChatAnthropic
+
+<span class="kw">class</span> <span class="cl">LLMFactory</span>:
+    <span class="kw">def</span> <span class="fn2">create_llm</span>(self, provider=<span class="kw">None</span>):
+        provider = provider <span class="kw">or</span> self.settings.LLM_PROVIDER
+        <span class="kw">if</span> provider == <span class="st">"anthropic"</span>:
+            <span class="kw">return</span> <span class="cl">ChatAnthropic</span>(          <span class="cm"># langchain-anthropic</span>
+                model=self.settings.LLM_MODEL,
+                api_key=self.settings.LLM_API_KEY,
+                base_url=self.settings.LLM_API_BASE,  <span class="cm"># MIMO 代理地址</span>
+                temperature=self.settings.LLM_TEMPERATURE,
+                max_tokens=self.settings.LLM_MAX_TOKENS,
+            )
+        <span class="kw">elif</span> provider == <span class="st">"openai"</span>:
+            <span class="kw">return</span> <span class="cl">ChatOpenAI</span>(...)          <span class="cm"># langchain-openai</span>
+        <span class="kw">elif</span> provider == <span class="st">"ollama"</span>:
+            <span class="kw">return</span> <span class="cl">Ollama</span>(...)               <span class="cm"># langchain-community</span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ==================== 2. 系统架构 ==================== -->
+<section id="arch" style="background:rgba(30,41,59,.5);">
+    <div class="container">
+        <h2>2. 系统全景架构</h2>
+        <p class="sub">从用户请求到结果返回的完整数据流</p>
+        <div class="arch-box">
+            <div class="arch-t">System Architecture</div>
+            <div class="layer"><div class="layer-lb">User Layer</div><div class="layer-ns"><div class="fn3 user"><div class="ic">Streamlit</div><div class="lb">前端界面</div><div class="ds">聊天 + 文件上传</div></div></div></div>
+            <div style="text-align:center;color:var(--text-muted);font-size:1.1rem;">&#8595;</div>
+            <div class="layer"><div class="layer-lb">API Layer</div><div class="layer-ns">
+                <div class="fn3 api"><div class="ic">FastAPI</div><div class="lb">REST API</div><div class="ds">/api/v1/review</div></div>
+                <div class="fn3 infra"><div class="ic">RabbitMQ</div><div class="lb">消息队列</div><div class="ds">异步持久化</div></div>
+                <div class="fn3 api"><div class="ic">TaskManager</div><div class="lb">任务管理</div><div class="ds">提交/查询/持久化</div></div>
+            </div></div>
+            <div style="text-align:center;color:var(--text-muted);font-size:1.1rem;">&#8595;</div>
+            <div class="layer"><div class="layer-lb">Coordination Layer</div><div class="layer-ns">
+                <div class="fn3 core" style="min-width:190px;"><div class="ic">CoordinatorAgent</div><div class="lb">智能协调器</div><div class="ds">LLM 动态规划</div></div>
+                <div class="fn3 core"><div class="ic">MessageBus</div><div class="lb">消息总线</div><div class="ds">Agent 间通信</div></div>
+                <div class="fn3 core"><div class="ic">MultiTurnHandler</div><div class="lb">多轮对话</div><div class="ds">意图识别+上下文</div></div>
+            </div></div>
+            <div style="text-align:center;color:var(--text-muted);font-size:1.1rem;">&#8595;</div>
+            <div class="layer"><div class="layer-lb">Agent Layer (并行执行)</div><div class="layer-ns">
+                <div class="fn3 agent"><div class="ic">parse</div><div class="lb">文档解析</div><div class="ds">DocumentParser</div></div>
+                <div class="fn3 agent"><div class="ic">clause</div><div class="lb">条款分析</div><div class="ds">ClauseAnalysis</div></div>
+                <div class="fn3 agent"><div class="ic">risk</div><div class="lb">风险评估</div><div class="ds">RiskAssessment</div></div>
+                <div class="fn3 agent"><div class="ic">check</div><div class="lb">合规检查</div><div class="ds">ComplianceCheck</div></div>
+                <div class="fn3 agent"><div class="ic">report</div><div class="lb">报告生成</div><div class="ds">ReportGenerator</div></div>
+            </div></div>
+            <div style="text-align:center;color:var(--text-muted);font-size:1.1rem;">&#8595;</div>
+            <div class="layer"><div class="layer-lb">Infrastructure Layer</div><div class="layer-ns">
+                <div class="fn3 infra"><div class="ic">LLM</div><div class="lb">MIMO/Claude</div><div class="ds">LangChain 封装</div></div>
+                <div class="fn3 infra"><div class="ic">Qdrant</div><div class="lb">向量数据库</div><div class="ds">法规+案例+记忆</div></div>
+                <div class="fn3 infra"><div class="ic">Embedding</div><div class="lb">bge-m3</div><div class="ds">Ollama API</div></div>
+                <div class="fn3 infra"><div class="ic">JSON</div><div class="lb">文件持久化</div><div class="ds">任务状态</div></div>
+            </div></div>
+        </div>
+    </div>
+</section>
+
+<!-- ==================== 3. LLM 工厂 ==================== -->
+<section id="llm-factory">
+    <div class="container">
+        <h2>3. LLM 工厂 &mdash; llm_factory.py</h2>
+        <p class="sub">统一管理 LLM 实例，所有 Agent 通过 <code>get_llm()</code> 获取</p>
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">src/utils/llm_factory.py</span></div>
+            <div class="cb-c">
+<span class="kw">from</span> langchain_core.language_models <span class="kw">import</span> BaseLLM
+<span class="kw">from</span> langchain_anthropic <span class="kw">import</span> ChatAnthropic
+
+<span class="kw">class</span> <span class="cl">LLMFactory</span>:
+    <span class="kw">def</span> <span class="fn2">__init__</span>(self):
+        self.settings = get_settings()
+        self._llm: Optional[BaseLLM] = <span class="kw">None</span>    <span class="cm"># 单例缓存</span>
+
+    <span class="kw">def</span> <span class="fn2">create_llm</span>(self, provider=<span class="kw">None</span>) -> BaseLLM:
+        provider = provider <span class="kw">or</span> self.settings.LLM_PROVIDER
+        <span class="kw">if</span> provider == <span class="st">"anthropic"</span>:
+            <span class="kw">return</span> <span class="cl">ChatAnthropic</span>(
+                model=self.settings.LLM_MODEL,       <span class="cm"># "mimo-v2.5"</span>
+                api_key=self.settings.LLM_API_KEY,
+                base_url=self.settings.LLM_API_BASE,  <span class="cm"># "https://token-plan-cn.xiaomimimo.com/anthropic"</span>
+                temperature=self.settings.LLM_TEMPERATURE,  <span class="cm"># 0.3</span>
+                max_tokens=self.settings.LLM_MAX_TOKENS,    <span class="cm"># 10000</span>
+            )
+        <span class="cmt"># ... openai / ollama 分支类似</span>
+
+    <span class="kw">def</span> <span class="fn2">get_llm</span>(self) -> BaseLLM:
+        <span class="kw">if</span> self._llm <span class="kw">is</span> <span class="kw">None</span>:
+            self._llm = self.create_llm()  <span class="cm"># 懒加载 + 单例</span>
+        <span class="kw">return</span> self._llm
+
+<span class="cmt"># 全局便捷函数</span>
+llm_factory = LLMFactory()
+<span class="kw">def</span> <span class="fn2">get_llm</span>() -> BaseLLM:
+    <span class="kw">return</span> llm_factory.get_llm()
+            </div>
+        </div>
+        <div class="explain"><strong>设计要点：</strong>单例模式，整个进程共享一个 LLM 实例。切换 provider 只需改 <code>config/settings.py</code> 中的 <code>LLM_PROVIDER</code>。所有 Agent 基类自动调用 <code>get_llm()</code> 获取实例。</div>
+    </div>
+</section>
+
+<!-- ==================== 4. BaseAgent 基类 ==================== -->
+<section id="base-agent" style="background:rgba(30,41,59,.5);">
+    <div class="container">
+        <h2>4. BaseAgent 基类 &mdash; base_agent.py</h2>
+        <p class="sub">所有 5 个 Agent 的父类，定义统一接口和生命周期管理</p>
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">src/agents/base_agent.py</span></div>
+            <div class="cb-c">
+<span class="kw">from</span> abc <span class="kw">import</span> ABC, abstractmethod
+<span class="kw">from</span> langchain_core.language_models <span class="kw">import</span> BaseLLM
+<span class="kw">from</span> src.utils.llm_factory <span class="kw">import</span> get_llm
+
+<span class="kw">class</span> <span class="cl">BaseAgent</span>(ABC):
+    <span class="kw">def</span> <span class="fn2">__init__</span>(self, agent_id, name, role, llm=<span class="kw">None</span>, description=<span class="st">""</span>):
+        self.agent_id = agent_id       <span class="cm"># "document_parser"</span>
+        self.name = name               <span class="cm"># "文档解析Agent"</span>
+        self.role = role               <span class="cm"># "document_parser" (用于 Coordinator 查找)</span>
+        self.llm = llm <span class="kw">or</span> get_llm()   <span class="cm"># 从 LLMFactory 获取实例</span>
+        self.is_running = <span class="kw">False</span>
+        self.private_memory = {}       <span class="cm"># 私有记忆字典</span>
+
+    <span class="kw">@abstractmethod</span>
+    <span class="kw">async def</span> <span class="fn2">process</span>(self, task: Dict) -> Dict:
+        <span class="cm">"""每个子类必须实现的处理方法"""</span>
+        <span class="kw">pass</span>
+
+    <span class="kw">def</span> <span class="fn2">get_status</span>(self) -> Dict:
+        <span class="kw">return</span> {
+            <span class="st">"agent_id"</span>: self.agent_id,
+            <span class="st">"name"</span>: self.name,
+            <span class="st">"role"</span>: self.role,
+            <span class="st">"is_running"</span>: self.is_running,
+        }
+            </div>
+        </div>
+        <div class="explain"><strong>关键设计：</strong><code>self.llm</code> 是 LangChain 的 <code>BaseLLM</code> 实例，子类直接调用 <code>self.llm.ainvoke(messages)</code> 即可与 LLM 交互。<code>role</code> 字段用于 CoordinatorAgent 根据执行计划查找对应 Agent。</div>
+    </div>
+</section>
+
+<!-- ==================== 5. CoordinatorAgent ==================== -->
+<section id="coordinator">
+    <div class="container">
+        <h2>5. CoordinatorAgent &mdash; 核心调度器</h2>
+        <p class="sub">LLM 动态规划执行计划 + asyncio.gather 并行执行</p>
+
+        <div class="arch-box">
+            <div class="arch-t">CoordinatorAgent 执行流程</div>
+            <div class="cf">
+                <div class="cr"><div class="cb2 b">用户提交合同文本</div></div>
+                <div class="ca">&#8595;</div>
+                <div class="cr"><div class="cb2 p">_plan_execution()</div></div>
+                <div class="clb">LLM 分析任务需求，输出 JSON 执行计划</div>
+                <div class="ca">&#8595;</div>
+                <div class="cr"><div class="cb2 o" style="min-width:260px;">执行计划 (JSON 数组)</div></div>
+                <div class="clb">哪些 Agent 参与、什么顺序、哪些可并行</div>
+                <div class="ca">&#8595;</div>
+                <div class="clb" style="margin-bottom:4px;">asyncio.gather 并行执行 (依赖已满足的任务)</div>
+                <div class="cpar">
+                    <div class="cb2 g">parse_document</div>
+                    <div class="cb2 g">analyze_clauses</div>
+                    <div class="cb2 g">assess_risks</div>
+                    <div class="cb2 g">compliance_check</div>
+                </div>
+                <div class="clb">前4个无依赖 &rarr; 并行</div>
+                <div class="ca">&#8595;</div>
+                <div class="cpar"><div class="cb2 g" style="min-width:200px;">generate_report (依赖前4个)</div></div>
+                <div class="clb">串行执行，收集所有前序结果</div>
+                <div class="ca">&#8595;</div>
+                <div class="cr"><div class="cb2 p">_aggregate_results()</div></div>
+                <div class="clb">汇总所有 Agent 结果，构建最终响应</div>
+                <div class="ca">&#8595;</div>
+                <div class="cr"><div class="cb2 b">返回审查结果</div></div>
+            </div>
+        </div>
+
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">coordinator_agent.py &mdash; LLM 规划执行计划</span></div>
+            <div class="cb-c">
+<span class="kw">async def</span> <span class="fn2">_plan_execution</span>(self, task) -> List[Dict]:
+    <span class="cm">"""用 LLM 生成执行计划"""</span>
+    system_prompt = <span class="st">"""你是一个智能任务规划专家。根据可用的Agent，制定最优执行计划。
+可用的Agent：
+{agent_descriptions}
+
+输出格式（JSON数组）：
+[{{
+    "task_name": "任务名称",
+    "agent_role": "agent角色",
+    "depends_on": ["依赖的任务名"],
+    "parallel": false
+}}]"""</span>
+
+    messages = [
+        <span class="cl">SystemMessage</span>(content=system_prompt.format(
+            agent_descriptions=self._get_agent_descriptions()
+        )),
+        <span class="cl">HumanMessage</span>(content=<span class="st">f"合同类型: {contract_type}..."</span>)
+    ]
+    response = <span class="kw">await</span> self.llm.<span class="fn2">ainvoke</span>(messages)  <span class="cm"># LangChain 异步调用</span>
+    plan = parse_json_from_llm(response.content)   <span class="cm"># 解析 JSON</span>
+    <span class="kw">return</span> self._validate_plan(plan)
+            </div>
+        </div>
+
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">coordinator_agent.py &mdash; 并行调度 + 结果汇总</span></div>
+            <div class="cb-c">
+<span class="kw">async def</span> <span class="fn2">_execute_plan</span>(self, plan, original_task, contract_text):
+    results = {}; completed = <span class="kw">set</span>()
+    task_map = {p[<span class="st">"task_name"</span>]: p <span class="kw">for</span> p <span class="kw">in</span> plan}
+
+    <span class="kw">while</span> len(completed) < len(plan):
+        <span class="cm"># 找出依赖已满足的任务</span>
+        ready = [name <span class="kw">for</span> name, info <span class="kw">in</span> task_map.items()
+                 <span class="kw">if</span> name <span class="kw">not in</span> completed
+                 <span class="kw">and</span> all(d <span class="kw">in</span> completed <span class="kw">for</span> d <span class="kw">in</span> info.get(<span class="st">"depends_on"</span>, []))]
+
+        <span class="cm"># 并行执行就绪任务</span>
+        async_tasks = []
+        <span class="kw">for</span> task_name <span class="kw">in</span> ready:
+            agent = self._find_agent_by_role(task_map[task_name][<span class="st">"agent_role"</span>])
+            task_input = self._prepare_input(task_map[task_name], original_task, contract_text, results)
+            async_tasks.append(self._execute_single(task_name, agent, task_input))
+
+        task_results = <span class="kw">await</span> asyncio.<span class="fn2">gather</span>(*async_tasks, return_exceptions=True)
+        <span class="kw">for</span> (name, _, _), result <span class="kw">in</span> zip(ready, task_results):
+            results[name] = result; completed.add(name)
+
+    <span class="kw">return</span> results
+
+<span class="kw">def</span> <span class="fn2">_find_agent_by_role</span>(self, role: str) -> Optional[BaseAgent]:
+    <span class="cm">"""根据 role 字段查找已注册的 Agent"""</span>
+    <span class="kw">for</span> agent <span class="kw">in</span> self._registered_agents.values():
+        <span class="kw">if</span> agent.role == role:
+            <span class="kw">return</span> agent
+    <span class="kw">return</span> <span class="kw">None</span>
+            </div>
+        </div>
+        <div class="explain"><strong>调度核心逻辑：</strong>while 循环不断找"依赖已满足"的任务 → asyncio.gather 并行执行 → 标记完成 → 继续下一轮。当所有任务完成（如 generate_report 依赖前4个），自动串行执行。</div>
+    </div>
+</section>
+
+<!-- ==================== 6. DocumentParserAgent ==================== -->
+<section id="doc-parser" style="background:rgba(30,41,59,.5);">
+    <div class="container">
+        <h2>6. DocumentParserAgent &mdash; 文档解析</h2>
+        <p class="sub">LLM 驱动的合同结构化信息提取，支持长文本 Map-Reduce</p>
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">document_parser_agent.py &mdash; 核心处理逻辑</span></div>
+            <div class="cb-c">
+<span class="kw">async def</span> <span class="fn2">process</span>(self, task: Dict) -> Dict:
+    contract_text = task.get(<span class="st">"contract_text"</span>, <span class="st">""</span>)
+    <span class="kw">if</span> len(contract_text) > self.chunk_size:  <span class="cm"># 12000 字符阈值</span>
+        <span class="kw">return await</span> self._map_reduce_extract(contract_text)  <span class="cm"># 长文本分块</span>
+    <span class="kw">return await</span> self._llm_extract_all(contract_text)        <span class="cm"># 短文本直接提取</span>
+
+<span class="kw">async def</span> <span class="fn2">_llm_extract_all</span>(self, text, specified_type=<span class="kw">None</span>):
+    <span class="cm">"""单次 LLM 调用提取所有信息"""</span>
+    system_prompt = <span class="st">"""你是一个专业的合同信息提取助手。
+输出格式（严格JSON）：
+{{
+  "basic_info": {{"title": "...", "parties": [...], "signing_date": "..."}},
+  "contract_type": "sales/service/lease/...",
+  "sections": [{{"id": "1", "title": "...", "content": "...", "level": 1}}],
+  "dates": [{{"raw": "...", "date": "YYYY-MM-DD", "type": "签署/生效/到期"}}],
+  "amounts": [{{"raw": "...", "value": 数值, "currency": "CNY", "type": "总价/违约金"}}],
+  "definitions": [{{"term": "术语", "definition": "定义内容"}}]
+}}
+规则：金额统一为元，日期统一YYYY-MM-DD，只输出JSON"""</span>
+
+    messages = [<span class="cl">SystemMessage</span>(content=system_prompt),
+                <span class="cl">HumanMessage</span>(content=<span class="st">f"请提取以下合同的信息：\n\n{text}"</span>)]
+    response = <span class="kw">await</span> self.llm.<span class="fn2">ainvoke</span>(messages)   <span class="cm"># LangChain 异步调用</span>
+    content = extract_llm_content(response.content) <span class="cm"># 处理不同响应格式</span>
+    <span class="kw">return</span> parse_json_from_llm(content)            <span class="cm"># 容错 JSON 解析</span>
+            </div>
+        </div>
+        <div class="explain"><strong>Map-Reduce 长文本策略：</strong>超过 12000 字符时，按条款边界（"第X条"）语义分块 → 每块并行 LLM 提取 → 合并去重 → 输出统一结构。短文本直接一次 LLM 调用。</div>
+    </div>
+</section>
+
+<!-- ==================== 7. RiskAssessmentAgent ==================== -->
+<section id="risk">
+    <div class="container">
+        <h2>7. RiskAssessmentAgent &mdash; 风险评估</h2>
+        <p class="sub">LLM 识别风险 + 量化评分 + 缓解建议生成</p>
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">risk_assessment_agent.py &mdash; LLM 风险评估</span></div>
+            <div class="cb-c">
+<span class="kw">async def</span> <span class="fn2">_assess_with_llm</span>(self, text, contract_type):
+    system_prompt = <span class="st">"""你是一个资深的合同风险评估专家。
+输出格式（严格JSON）：
+{{
+  "risk_level": "low/medium/high/critical",
+  "risks": [{{
+    "name": "风险名称",
+    "severity": "high/medium/low",
+    "category": "liability/termination/payment/ip/...",
+    "description": "详细描述",
+    "suggestion": "修改建议"
+  }}],
+  "recommendations": [{{"priority": "high", "suggestion": "...", "reason": "..."}}],
+  "summary": {{"total_risks": 5, "high_risks": 2, ...}}
+}}
+规则：识别无限责任、单方解除、自动续约、违约金过高、管辖权等风险"""</span>
+
+    messages = [<span class="cl">SystemMessage</span>(content=system_prompt),
+                <span class="cl">HumanMessage</span>(content=<span class="st">f"请对以下合同进行风险评估：\n\n{text[:8000]}"</span>)]
+    response = <span class="kw">await</span> self.llm.<span class="fn2">ainvoke</span>(messages)
+    result = parse_json_from_llm(extract_llm_content(response.content))
+
+    <span class="cm"># LLM 失败时回退到正则匹配</span>
+    <span class="kw">if not</span> result <span class="kw">or not</span> isinstance(result, dict):
+        <span class="kw">return</span> self._assess_with_regex(text)  <span class="cm"># 检测"无限责任"、"单方解除"等关键词</span>
+
+    result[<span class="st">"risk_quantification"</span>] = self.quantify_risk(result.get(<span class="st">"risks"</span>, []))
+    result[<span class="st">"mitigation_plan"</span>] = self.suggest_mitigation(result.get(<span class="st">"risks"</span>, []))
+    <span class="kw">return</span> result
+            </div>
+        </div>
+        <div class="explain"><strong>风险量化算法：</strong>每个风险按 severity（high=3, medium=2, low=1）× category 权重（liability=1.5, payment=1.3, ip=1.4...）计算加权分数，归一化到 0-100 分。高/中风险自动生成缓解建议模板。</div>
+    </div>
+</section>
+
+<!-- ==================== 8. ComplianceCheckerAgent ==================== -->
+<section id="compliance" style="background:rgba(30,41,59,.5);">
+    <div class="container">
+        <h2>8. ComplianceCheckerAgent &mdash; 合规检查</h2>
+        <p class="sub">必备条款检查 + LLM 法规匹配 + Qdrant 向量检索</p>
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">compliance_checker_agent.py &mdash; 必备条款定义</span></div>
+            <div class="cb-c">
+<span class="kw">class</span> <span class="cl">ComplianceCheckerAgent</span>(BaseAgent):
+    <span class="cmt"># 各类合同的必备条款（硬编码规则）</span>
+    REQUIRED_CLAUSES = {
+        <span class="st">"sales"</span>:     [<span class="st">"标的物"</span>, <span class="st">"价款"</span>, <span class="st">"交付"</span>, <span class="st">"验收"</span>, <span class="st">"违约责任"</span>, <span class="st">"争议解决"</span>],
+        <span class="st">"service"</span>:   [<span class="st">"服务内容"</span>, <span class="st">"服务期限"</span>, <span class="st">"服务费用"</span>, <span class="st">"验收标准"</span>, <span class="st">"违约责任"</span>, <span class="st">"保密"</span>],
+        <span class="st">"lease"</span>:     [<span class="st">"租赁物"</span>, <span class="st">"租期"</span>, <span class="st">"租金"</span>, <span class="st">"维修责任"</span>, <span class="st">"违约责任"</span>, <span class="st">"终止条件"</span>],
+        <span class="st">"labor"</span>:     [<span class="st">"工作内容"</span>, <span class="st">"劳动报酬"</span>, <span class="st">"工作时间"</span>, <span class="st">"社会保险"</span>, <span class="st">"劳动保护"</span>, <span class="st">"解除条件"</span>],
+        <span class="st">"nda"</span>:       [<span class="st">"保密信息定义"</span>, <span class="st">"保密义务"</span>, <span class="st">"保密期限"</span>, <span class="st">"违约责任"</span>, <span class="st">"争议解决"</span>],
+        <span class="st">"general"</span>:   [<span class="st">"合同标的"</span>, <span class="st">"价款报酬"</span>, <span class="st">"履行期限"</span>, <span class="st">"违约责任"</span>, <span class="st">"争议解决"</span>],
+    }
+            </div>
+        </div>
+        <div class="explain"><strong>合规检查流程：</strong>1) 根据合同类型匹配必备条款列表 → 检查缺失 2) LLM 分析违规条款（如违法免责、过高违约金）3) 从 Qdrant 向量库检索相关法规辅助判定 4) 输出 compliance_score + violations + missing_clauses。</div>
+    </div>
+</section>
+
+<!-- ==================== 9. ReportGeneratorAgent ==================== -->
+<section id="report">
+    <div class="container">
+        <h2>9. ReportGeneratorAgent &mdash; 报告生成</h2>
+        <p class="sub">汇总前 4 个 Agent 的全部输出，生成结构化审查报告</p>
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">report_generator_agent.py &mdash; 核心逻辑</span></div>
+            <div class="cb-c">
+<span class="kw">async def</span> <span class="fn2">process</span>(self, task: Dict) -> Dict:
+    previous_results = task.get(<span class="st">"previous_results"</span>, {})
+    <span class="cmt"># previous_results 包含：</span>
+    <span class="cmt">#   parse_result     - DocumentParserAgent 的输出</span>
+    <span class="cmt">#   clause_result    - ClauseAnalysisAgent 的输出</span>
+    <span class="cmt">#   risk_result      - RiskAssessmentAgent 的输出</span>
+    <span class="cmt">#   compliance_result - ComplianceCheckerAgent 的输出</span>
+    <span class="kw">return await</span> self._generate_with_llm(previous_results)
+            </div>
+        </div>
+        <div class="explain"><strong>数据流：</strong>CoordinatorAgent 在执行 generate_report 时，自动把前 4 个 Agent 的结果打包为 <code>previous_results</code> 传入。ReportGenerator 将这些数据拼接为 prompt，由 LLM 生成综合报告。</div>
+    </div>
+</section>
+
+<!-- ==================== 10. 多轮对话 ==================== -->
+<section id="multi-turn" style="background:rgba(30,41,59,.5);">
+    <div class="container">
+        <h2>10. MultiTurnHandler &mdash; 多轮对话</h2>
+        <p class="sub">意图识别 → 上下文注入 → Agent 路由 → 结果存储</p>
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">multi_turn_handler.py &mdash; 核心方法</span></div>
+            <div class="cb-c">
+<span class="kw">async def</span> <span class="fn2">handle_message</span>(self, session_id, user_message, contract_text=<span class="kw">None</span>):
+    <span class="cm"># 1. 获取/创建会话上下文</span>
+    ctx = self.conversation_manager.get_or_create(session_id)
+    ctx.add_user_message(user_message)
+
+    <span class="cm"># 2. 意图识别 (关键词 or LLM)</span>
+    intent = self.intent_recognizer.recognize(user_message, ctx.get_intent_context())
+
+    <span class="cm"># 3. 构建任务上下文 + 追问上下文注入</span>
+    task_context = ctx.build_task_context()
+    task_context = self._inject_follow_up_context(task_context, intent, ctx)
+    <span class="cm">#   例：用户说"评估风险" → 自动注入之前的 parse_result</span>
+
+    <span class="cm"># 4. 路由到对应 Agent</span>
+    routing = INTENT_AGENT_ROUTING[intent.type]
+    <span class="cm">#   contract_review → coordinator</span>
+    <span class="cm">#   risk_assessment → risk_assessor</span>
+    <span class="cm">#   compliance_check → compliance_checker</span>
+
+    <span class="cm"># 5. 执行 + 结果存储</span>
+    result = <span class="kw">await</span> self._execute_agent(routing[<span class="st">"agent"</span>], task_context)
+    ctx.set_agent_result(routing[<span class="st">"agent"</span>], result)
+
+    <span class="cm"># 6. 格式化回复</span>
+    response = self._format_response(intent.type, result, ctx, routing[<span class="st">"agent"</span>])
+    <span class="kw">return</span> {<span class="st">"intent"</span>: intent, <span class="st">"agent"</span>: routing[<span class="st">"agent"</span>], <span class="st">"result"</span>: result, <span class="st">"response"</span>: response}
+            </div>
+        </div>
+
+        <table class="tb">
+            <thead><tr><th>意图</th><th>触发词</th><th>目标 Agent</th><th>需要合同</th></tr></thead>
+            <tbody>
+                <tr><td><strong>合同审查</strong></td><td>审查、检查、分析合同</td><td>CoordinatorAgent</td><td>是</td></tr>
+                <tr><td><strong>条款分析</strong></td><td>条款、条文、约定</td><td>ClauseAnalysisAgent</td><td>是</td></tr>
+                <tr><td><strong>风险评估</strong></td><td>风险、危险、隐患</td><td>RiskAssessmentAgent</td><td>是</td></tr>
+                <tr><td><strong>合规检查</strong></td><td>合规、合法、法规</td><td>ComplianceCheckerAgent</td><td>是</td></tr>
+                <tr><td><strong>报告生成</strong></td><td>报告、总结、汇总</td><td>ReportGeneratorAgent</td><td>否</td></tr>
+                <tr><td><strong>问题回答</strong></td><td>什么是、如何、为什么</td><td>CoordinatorAgent</td><td>否</td></tr>
+                <tr><td><strong>问候</strong></td><td>你好、hi、hello</td><td>System</td><td>否</td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- ==================== 11. 通信机制 ==================== -->
+<section id="communication">
+    <div class="container">
+        <h2>11. MessageBus &mdash; Agent 通信</h2>
+        <p class="sub">发布-订阅模式，Agent 间解耦通信</p>
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">communication.py</span></div>
+            <div class="cb-c">
+<span class="kw">class</span> <span class="cl">MessageType</span>(Enum):
+    TASK_ASSIGN  = <span class="st">"task_assign"</span>   <span class="cm"># 协调器 → Agent: 分配任务</span>
+    TASK_RESULT  = <span class="st">"task_result"</span>   <span class="cm"># Agent → 协调器: 返回结果</span>
+    QUERY        = <span class="st">"query"</span>         <span class="cm"># Agent → Agent: 查询</span>
+    NOTIFICATION = <span class="st">"notification"</span>  <span class="cm"># 广播通知</span>
+
+<span class="kw">class</span> <span class="cl">MessageBus</span>:
+    <span class="kw">def</span> <span class="fn2">subscribe</span>(self, agent_id, callback): ...
+    <span class="kw">def</span> <span class="fn2">publish</span>(self, message: AgentMessage):
+        self._message_queue.append(message)
+        <span class="kw">if</span> message.receiver_id <span class="kw">in</span> self._subscribers:
+            <span class="kw">for</span> cb <span class="kw">in</span> self._subscribers[message.receiver_id]:
+                cb(message)  <span class="cm"># 触发回调</span>
+
+<span class="cm"># CoordinatorAgent 发送消息示例：</span>
+<span class="kw">def</span> <span class="fn2">_publish_task_start</span>(self, task_name, agent):
+    msg = <span class="cl">AgentMessage</span>(
+        sender_id=self.agent_id,
+        receiver_id=agent.agent_id,
+        message_type=MessageType.TASK_ASSIGN,
+        content={<span class="st">"action"</span>: <span class="st">"start"</span>, <span class="st">"task_name"</span>: task_name}
+    )
+    self.message_bus.publish(msg)
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ==================== 12. 向量数据库 ==================== -->
+<section id="vector" style="background:rgba(30,41,59,.5);">
+    <div class="container">
+        <h2>12. QdrantVectorStore &mdash; 向量数据库</h2>
+        <p class="sub">远程 bge-m3 Embedding + Qdrant 向量检索</p>
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">src/services/vector_store.py &mdash; 核心类</span></div>
+            <div class="cb-c">
+<span class="kw">class</span> <span class="cl">QdrantVectorStore</span>:
+    <span class="kw">def</span> <span class="fn2">__init__</span>(self):
+        <span class="kw">try</span>:
+            self.client = <span class="cl">QdrantClient</span>(url=settings.QDRANT_URL, timeout=3)
+            self.client.get_collections()  <span class="cm"># 测试连接</span>
+        <span class="kw">except</span>:
+            self.client = <span class="cl">QdrantClient</span>(<span class="st">":memory:"</span>)  <span class="cm"># 回退内存模式</span>
+        self._http_client = httpx.Client(timeout=30)
+
+    <span class="kw">def</span> <span class="fn2">_encode</span>(self, texts: List[str]) -> List[List[float]]:
+        <span class="cm">"""调用远程 bge-m3 Embedding API"""</span>
+        resp = self._http_client.post(
+            settings.EMBEDDING_URL,  <span class="cm"># http://10.0.81.167:11434/api/embed</span>
+            json={<span class="st">"model"</span>: settings.EMBEDDING_MODEL, <span class="st">"input"</span>: texts},
+        )
+        data = resp.json()
+        <span class="kw">if</span> <span class="st">"embeddings"</span> <span class="kw">in</span> data: <span class="kw">return</span> data[<span class="st">"embeddings"</span>]  <span class="cm"># Ollama 格式</span>
+        <span class="kw">if</span> <span class="st">"data"</span> <span class="kw">in</span> data: <span class="kw">return</span> [d[<span class="st">"embedding"</span>] <span class="kw">for</span> d <span class="kw">in</span> data[<span class="st">"data"</span>]]  <span class="cm"># OpenAI 格式</span>
+
+    <span class="kw">def</span> <span class="fn2">search</span>(self, collection_name, query, top_k=5, filters=<span class="kw">None</span>):
+        <span class="cm">"""向量相似度搜索"""</span>
+        query_vector = self._encode([query])[0]
+        results = self.client.query_points(
+            collection_name=collection_name,
+            query=query_vector,
+            limit=top_k,
+            query_filter=self._build_filter(filters),
+        )
+        <span class="kw">return</span> [{<span class="st">"id"</span>: hit.id, <span class="st">"score"</span>: hit.score, **(hit.payload <span class="kw">or</span> {})}
+                <span class="kw">for</span> hit <span class="kw">in</span> results.points]
+            </div>
+        </div>
+        <table class="tb">
+            <thead><tr><th>集合</th><th>用途</th><th>数据来源</th><th>向量维度</th></tr></thead>
+            <tbody>
+                <tr><td><code>entities_multi_vector_v2</code></td><td>法规条款</td><td>regulations.json</td><td>1024</td></tr>
+                <tr><td><code>entities_multi_vector_authority</code></td><td>权威案例</td><td>cases.json</td><td>1024</td></tr>
+                <tr><td><code>long_term_memory</code></td><td>审查历史+偏好</td><td>运行时写入</td><td>1024</td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- ==================== 13. 记忆系统 ==================== -->
+<section id="memory">
+    <div class="container">
+        <h2>13. 三层记忆系统</h2>
+        <p class="sub">私有记忆 → 会话记忆 → 长期记忆</p>
+        <div class="mg">
+            <div class="mc"><div class="mi">PrivateMemory</div><h4>私有记忆</h4><p><code>BaseAgent.private_memory</code> 字典。每个 Agent 独有，如文档解析 Agent 存储提取的结构化数据。生命周期 = Agent 实例。</p></div>
+            <div class="mc"><div class="mi">ConversationContext</div><h4>会话记忆</h4><p>多轮对话上下文：对话历史、意图链、各 Agent 结果缓存。生命周期 = 一次会话。存储在内存中。</p></div>
+            <div class="mc"><div class="mi">LongTermMemory</div><h4>长期记忆</h4><p>Qdrant 向量持久化：审查历史 + 用户偏好 + 知识积累。支持跨会话语义检索。</p></div>
+        </div>
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">long_term_memory.py &mdash; 保存审查记忆</span></div>
+            <div class="cb-c">
+<span class="kw">def</span> <span class="fn2">save_review_memory</span>(self, contract_name, contract_text, result, user_id=<span class="st">"default"</span>):
+    memory_text = <span class="st">f"合同: {contract_name} | 风险: {result.get('risk_level')}"</span>
+    payload = {
+        <span class="st">"type"</span>: <span class="st">"review"</span>,
+        <span class="st">"user_id"</span>: user_id,
+        <span class="st">"contract_name"</span>: contract_name,
+        <span class="st">"memory_text"</span>: memory_text,  <span class="cm"># 用于向量化</span>
+        <span class="st">"result_summary"</span>: {<span class="st">"risk_level"</span>: ..., <span class="st">"compliance_score"</span>: ...},
+    }
+    self.store.add_documents(             <span class="cm"># 写入 Qdrant</span>
+        collection_name=settings.QDRANT_COLLECTION_MEMORY,
+        documents=[payload],
+        text_field=<span class="st">"memory_text"</span>,
+    )
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ==================== 14. API 接口 ==================== -->
+<section id="api" style="background:rgba(30,41,59,.5);">
+    <div class="container">
+        <h2>14. REST API 接口</h2>
+        <p class="sub">FastAPI 提供的 HTTP 端点</p>
+        <table class="tb">
+            <thead><tr><th>方法</th><th>路径</th><th>说明</th><th>处理方式</th></tr></thead>
+            <tbody>
+                <tr><td><code>POST</code></td><td>/api/v1/review</td><td>提交合同审查</td><td>异步 (RabbitMQ)</td></tr>
+                <tr><td><code>POST</code></td><td>/api/v1/review/sync</td><td>同步合同审查</td><td>直接处理返回</td></tr>
+                <tr><td><code>GET</code></td><td>/api/v1/tasks/{id}</td><td>查询任务状态</td><td>文件持久化</td></tr>
+                <tr><td><code>GET</code></td><td>/api/v1/tasks</td><td>列出任务</td><td>支持状态过滤</td></tr>
+                <tr><td><code>POST</code></td><td>/api/v1/upload</td><td>上传文件审查</td><td>PDF/DOCX/TXT</td></tr>
+                <tr><td><code>POST</code></td><td>/api/v1/upload/sync</td><td>上传同步审查</td><td>直接返回结果</td></tr>
+                <tr><td><code>GET</code></td><td>/api/v1/memory/recall</td><td>查询历史记忆</td><td>Qdrant 检索</td></tr>
+                <tr><td><code>GET</code></td><td>/api/v1/memory/history</td><td>审查历史</td><td>Qdrant 检索</td></tr>
+                <tr><td><code>GET</code></td><td>/health</td><td>健康检查</td><td>&mdash;</td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- ==================== 15. 文件结构 ==================== -->
+<section id="files">
+    <div class="container">
+        <h2>15. 项目文件结构</h2>
+        <p class="sub">每个文件的职责一览</p>
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">contract-review-system/</span></div>
+            <div class="cb-c">
+├── config/
+│   └── <span class="fn2">settings.py</span>              <span class="cm"># 全局配置：LLM/Qdrant/Redis/RabbitMQ/Embedding</span>
+├── src/
+│   ├── agents/
+│   │   ├── <span class="cl">base_agent.py</span>           <span class="cm"># Agent 基类：self.llm + process() 抽象方法</span>
+│   │   ├── <span class="fn2">coordinator_agent.py</span>    <span class="cm"># ★核心★：LLM 规划 + asyncio 并行调度</span>
+│   │   ├── <span class="cl">document_parser_agent.py</span> <span class="cm"># LLM 结构化提取 + Map-Reduce 长文本</span>
+│   │   ├── <span class="cl">clause_analysis_agent.py</span>  <span class="cm"># LLM 条款语义分析 + 缺失检测</span>
+│   │   ├── <span class="cl">risk_assessment_agent.py</span>  <span class="cm"># LLM 风险识别 + 量化评分 + 缓解建议</span>
+│   │   ├── <span class="cl">compliance_checker_agent.py</span> <span class="cm"># 必备条款检查 + LLM 法规匹配</span>
+│   │   ├── <span class="cl">report_generator_agent.py</span>  <span class="cm"># 汇总前4个Agent结果，LLM 生成报告</span>
+│   │   ├── <span class="fn2">communication.py</span>       <span class="cm"># MessageBus 发布-订阅通信</span>
+│   │   ├── <span class="fn2">multi_turn_handler.py</span>  <span class="cm"># 多轮对话：意图→上下文→路由→执行</span>
+│   │   ├── <span class="fn2">intent_recognizer.py</span>   <span class="cm"># 意图识别：关键词/LLM 两种模式</span>
+│   │   └── <span class="fn2">conversation_context.py</span> <span class="cm"># 会话上下文：消息历史+意图链+Agent结果</span>
+│   ├── api/
+│   │   ├── <span class="fn2">main.py</span>                <span class="cm"># FastAPI 入口 + CORS</span>
+│   │   ├── <span class="fn2">routes.py</span>              <span class="cm"># API 路由：review/upload/tasks/memory</span>
+│   │   ├── <span class="fn2">task_manager.py</span>        <span class="cm"># 任务管理：RabbitMQ队列 + 文件持久化</span>
+│   │   └── <span class="fn2">document_parser.py</span>     <span class="cm"># 文件解析：PDF/DOCX/TXT → 文本</span>
+│   ├── services/
+│   │   └── <span class="fn2">vector_store.py</span>        <span class="cm"># Qdrant：远程bge-m3 Embedding + 向量检索</span>
+│   ├── memory/
+│   │   └── <span class="fn2">long_term_memory.py</span>    <span class="cm"># 长期记忆：审查历史/偏好/知识 → Qdrant</span>
+│   ├── skills/                       <span class="cm"># Skill 注册中心（法规/风险/文档/报告）</span>
+│   ├── tools/
+│   │   └── <span class="fn2">langchain_tools.py</span>     <span class="cm"># LangChain @tool 装饰器封装</span>
+│   └── utils/
+│       ├── <span class="fn2">llm_factory.py</span>         <span class="cm"># LLM 工厂：ChatAnthropic/OpenAI/Ollama</span>
+│       └── <span class="fn2">llm_response.py</span>        <span class="cm"># extract_llm_content() + parse_json_from_llm()</span>
+├── frontend/
+│   ├── <span class="fn2">app.py</span>                    <span class="cm"># Streamlit 入口</span>
+│   └── components/                 <span class="cm"># 聊天/上传/进度/结果组件</span>
+├── tests/                          <span class="cm"># 单元测试 + 集成测试</span>
+└── scripts/
+    └── <span class="fn2">init_vector_db.py</span>          <span class="cm"># 初始化 Qdrant 集合 + 导入法规/案例</span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<footer>
+    <p>Contract Review System &mdash; Architecture & Code Logic Document</p>
+    <p style="margin-top:6px;">LangChain + Multi-Agent + LLM Dynamic Planning</p>
+</footer>
+
+</body>
+</html>

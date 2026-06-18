@@ -8,6 +8,7 @@ import logging
 
 from .base_agent import BaseAgent
 from src.utils.llm_factory import get_llm
+from src.utils.llm_response import extract_llm_content
 from src.tools.langchain_tools import contract_tools
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,31 @@ class LangChainAgentWrapper:
         Returns:
             LLM响应
         """
+        messages = self._build_messages(message, system_prompt)
+        response = self.llm.invoke(messages)
+        content = extract_llm_content(response.content)
+        self._update_history(message, content)
+        return content
+
+    async def achat(self, message: str, system_prompt: Optional[str] = None) -> str:
+        """
+        与LLM异步对话
+
+        Args:
+            message: 用户消息
+            system_prompt: 系统提示词
+
+        Returns:
+            LLM响应
+        """
+        messages = self._build_messages(message, system_prompt)
+        response = await self.llm.ainvoke(messages)
+        content = extract_llm_content(response.content)
+        self._update_history(message, content)
+        return content
+
+    def _build_messages(self, message: str, system_prompt: Optional[str] = None):
+        """构建消息列表"""
         messages = []
 
         if system_prompt:
@@ -57,14 +83,12 @@ class LangChainAgentWrapper:
                 messages.append(AIMessage(content=msg["content"]))
 
         messages.append(HumanMessage(content=message))
+        return messages
 
-        response = self.llm.invoke(messages)
-
-        # 更新对话历史
-        self._conversation_history.append({"role": "user", "content": message})
-        self._conversation_history.append({"role": "assistant", "content": response.content})
-
-        return response.content
+    def _update_history(self, user_message: str, assistant_message: str):
+        """更新对话历史"""
+        self._conversation_history.append({"role": "user", "content": user_message})
+        self._conversation_history.append({"role": "assistant", "content": assistant_message})
 
     def analyze_with_tools(self, task: str, tool_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """

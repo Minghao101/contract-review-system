@@ -99,7 +99,7 @@ class LongTermMemory:
             "result_summary": {
                 "status": result.get("status"),
                 "risk_level": result.get("risk_level"),
-                "compliance_score": result.get("compliance_score"),
+                "compliance_score": result.get("compliance_score") or result.get("score"),
                 "risks_count": len(result.get("risks", [])),
                 "violations_count": len(result.get("compliance_violations", [])),
             },

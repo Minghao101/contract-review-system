@@ -1,3 +1,10 @@
 [server]
 excludePatterns = [".venv/*", "*/transformers/*"]
 fileWatcherType = "none"
+
+[theme]
+primaryColor = "#4F46E5"
+backgroundColor = "#f7f7f8"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1a1a2e"
+font = "sans serif"

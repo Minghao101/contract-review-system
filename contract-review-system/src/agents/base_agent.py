@@ -2,7 +2,7 @@
 基础Agent模块 - 定义所有Agent的基类
 """
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from langchain_core.language_models import BaseLLM
 
@@ -22,7 +22,8 @@ class BaseAgent(ABC):
         name: str,
         role: str,
         llm: Optional[BaseLLM] = None,
-        description: str = ""
+        description: str = "",
+        tools: Optional[List] = None
     ):
         """
         初始化Agent
@@ -33,6 +34,7 @@ class BaseAgent(ABC):
             role: Agent角色
             llm: LLM实例 (可选)
             description: Agent描述
+            tools: 可用工具列表 (可选)
         """
         self.agent_id = agent_id
         self.name = name
@@ -47,6 +49,42 @@ class BaseAgent(ABC):
 
         # 私有记忆
         self.private_memory: Dict[str, Any] = {}
+
+        # LangChain Agent包装器（延迟初始化）
+        self._wrapper = None
+        self._tools = tools
+
+    @property
+    def wrapper(self):
+        """获取LangChain Agent包装器（延迟初始化）"""
+        if self._wrapper is None:
+            from .langchain_agent import LangChainAgentWrapper
+            self._wrapper = LangChainAgentWrapper(self, self._tools)
+        return self._wrapper
+
+    async def chat(self, message: str, system_prompt: Optional[str] = None) -> str:
+        """
+        与LLM异步对话
+
+        Args:
+            message: 用户消息
+            system_prompt: 系统提示词
+
+        Returns:
+            LLM响应
+        """
+        return await self.wrapper.achat(message, system_prompt)
+
+    def clear_history(self):
+        """清空对话历史"""
+        if self._wrapper is not None:
+            self._wrapper.clear_history()
+
+    def get_history(self) -> List[Dict[str, str]]:
+        """获取对话历史"""
+        if self._wrapper is not None:
+            return self._wrapper.get_history()
+        return []
 
     @abstractmethod
     async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:

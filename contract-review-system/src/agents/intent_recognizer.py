@@ -1,5 +1,5 @@
 """
-意图识别模块 - 基于关键词和LLM的意图分类
+意图识别模块 - 基于Function Calling的LLM意图分类
 
 支持的意图类型：
 - CONTRACT_REVIEW: 完整合同审查
@@ -15,9 +15,10 @@ import re
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+from pydantic import BaseModel, Field
 import logging
 
-from src.utils.llm_response import extract_llm_content, parse_json_from_llm
+from src.utils.llm_factory import get_llm
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,28 @@ class IntentType(str, Enum):
     UNKNOWN = "unknown"
 
 
+# ==================== Function Calling 模型 ====================
+
+class IntentResult(BaseModel):
+    """意图识别结果（用于Function Calling）"""
+    intent: IntentType = Field(
+        description="用户意图类型"
+    )
+    confidence: float = Field(
+        description="置信度 0.0-1.0",
+        ge=0.0,
+        le=1.0
+    )
+    entities: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="提取的实体信息"
+    )
+    reasoning: str = Field(
+        default="",
+        description="判断理由"
+    )
+
+
 @dataclass
 class Intent:
     """意图识别结果"""
@@ -41,7 +64,8 @@ class Intent:
     confidence: float  # 0.0 - 1.0
     entities: Dict[str, Any] = field(default_factory=dict)
     raw_text: str = ""
-    method: str = "keyword"  # keyword / llm / hybrid
+    method: str = "function_calling"  # function_calling / keyword
+    reasoning: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -49,142 +73,128 @@ class Intent:
             "confidence": self.confidence,
             "entities": self.entities,
             "raw_text": self.raw_text[:100],
-            "method": self.method
+            "method": self.method,
+            "reasoning": self.reasoning
         }
 
 
-# ==================== 关键词规则 ====================
+# ==================== 关键词规则（快速路径） ====================
 
 INTENT_KEYWORDS: Dict[IntentType, Dict[str, Any]] = {
     IntentType.CONTRACT_REVIEW: {
         "keywords": [
             "审查合同", "合同审查", "审核合同", "合同审核",
             "检查合同", "合同检查", "分析合同", "合同分析",
-            "看看这个合同", "帮我看看", "帮我审查", "帮我分析",
-            "这份合同", "这个合同", "该合同", "合同文本",
-            "review", "contract review", "analyze contract",
+            "帮我审查", "帮我分析", "合同文本",
         ],
         "patterns": [
             r"审查.{0,5}合同",
             r"合同.{0,3}审查",
-            r"审核.{0,5}合同",
-            r"分析.{0,5}合同",
-            r"检查.{0,5}合同",
             r"帮我.{0,5}(审查|审核|分析|检查).{0,5}合同",
-            r"合同.{0,5}(条款|问题|内容)",
         ],
-        "min_text_length": 50,  # 合同文本通常较长
         "priority": 10,
     },
     IntentType.CLAUSE_ANALYSIS: {
         "keywords": [
             "条款分析", "分析条款", "解读条款", "条款解读",
-            "条款审查", "审查条款", "条款内容", "具体条款",
-            "clause", "clause analysis",
         ],
         "patterns": [
-            r"(分析|解读|审查|检查).{0,3}条款",
-            r"条款.{0,3}(分析|解读|审查|检查)",
-            r"第.{1,5}(条|款).{0,10}(分析|解读|意思|含义)",
+            r"(分析|解读|审查).{0,3}条款",
+            r"条款.{0,3}(分析|解读|审查)",
         ],
         "priority": 8,
     },
     IntentType.RISK_ASSESSMENT: {
         "keywords": [
-            "风险评估", "评估风险", "风险分析", "分析风险",
-            "风险检查", "检查风险", "有什么风险", "风险点",
-            "潜在风险", "风险提示", "风险等级", "风险",
-            "risk", "risk assessment", "risk analysis",
+            "风险评估", "评估风险", "风险分析", "有什么风险", "风险点",
         ],
         "patterns": [
-            r"(评估|分析|检查|识别).{0,10}风险",
-            r"风险.{0,5}(评估|分析|检查|识别)",
+            r"(评估|分析|检查).{0,10}风险",
             r"有(什么|哪些).{0,5}风险",
-            r"存在.{0,5}风险",
-            r"(看看|查看|了解).{0,5}风险",
         ],
         "priority": 8,
     },
     IntentType.COMPLIANCE_CHECK: {
         "keywords": [
-            "合规检查", "检查合规", "合规性", "合法合规",
-            "法律法规", "是否合法", "是否合规", "合规审查",
-            "compliance", "compliance check",
+            "合规检查", "是否合法", "是否合规", "合规审查",
         ],
         "patterns": [
-            r"(检查|审查|评估).{0,3}合规",
-            r"合规.{0,3}(检查|审查|评估)",
             r"是否.{0,3}(合法|合规|符合)",
-            r"符合.{0,3}(法律|法规|规定)",
         ],
         "priority": 7,
     },
     IntentType.REPORT_GENERATION: {
         "keywords": [
-            "生成报告", "生成审查报告", "报告生成", "输出报告",
-            "导出报告", "审查报告", "总结报告", "综合报告",
-            "generate report", "create report",
+            "生成报告", "生成审查报告", "输出报告", "导出报告",
         ],
         "patterns": [
             r"(生成|创建|输出|导出).{0,3}报告",
-            r"报告.{0,3}(生成|创建|输出|导出)",
-            r"给我.{0,3}报告",
         ],
         "priority": 6,
     },
     IntentType.QUESTION_ANSWER: {
         "keywords": [
-            "什么是", "怎么理解", "什么意思", "如何解释",
-            "请问", "问一下", "咨询", "疑问",
-            "question", "what is", "how to",
+            "什么是", "怎么理解", "什么意思", "请问",
+            "之前", "刚才", "上面", "之前解析", "刚才分析",
+            "哪一份", "哪个合同", "什么合同",
         ],
         "patterns": [
             r"什么是.{2,}",
-            r"怎么.{0,3}理解",
             r"什么意思",
-            r"(请问|问一下).{2,}",
+            r"之前.{0,5}(解析|分析|审查|处理)",
+            r"刚才.{0,5}(解析|分析|审查|处理)",
+            r"你.{0,5}(之前|刚才).{0,5}(哪|什么|哪个)",
+            r"哪一份合同",
+            r"哪个合同",
         ],
-        "priority": 4,
+        "priority": 5,
     },
     IntentType.GREETING: {
-        "keywords": [
-            "你好", "您好", "hello", "hi", "嗨",
-            "早上好", "下午好", "晚上好",
-        ],
-        "patterns": [
-            r"^(你好|您好|hello|hi|嗨)$",
-            r"^(早上好|下午好|晚上好)",
-        ],
+        "keywords": ["你好", "您好", "hello", "hi"],
+        "patterns": [r"^(你好|您好|hello|hi)$"],
         "priority": 1,
     },
 }
 
 
+# ==================== 意图描述（用于Function Calling） ====================
+
+INTENT_DESCRIPTIONS = {
+    IntentType.CONTRACT_REVIEW: "完整合同审查，包括解析、分析、评估、检查、生成报告。当用户提供合同文本并要求全面审查时使用",
+    IntentType.CLAUSE_ANALYSIS: "分析具体条款的内容、含义、风险。当用户询问某个特定条款时使用",
+    IntentType.RISK_ASSESSMENT: "评估合同中的风险点、风险等级。当用户关注风险时使用",
+    IntentType.COMPLIANCE_CHECK: "检查合同是否符合法律法规、行业标准。当用户关注合规性时使用",
+    IntentType.REPORT_GENERATION: "生成合同审查报告。当用户要求生成报告时使用",
+    IntentType.QUESTION_ANSWER: "回答关于合同的问题。当用户提问时使用",
+    IntentType.GREETING: "问候语。当用户打招呼时使用",
+    IntentType.UNKNOWN: "无法识别的意图",
+}
+
+
 class IntentRecognizer:
     """
-    意图识别器
+    意图识别器（Function Calling版本）
 
-    支持三种模式：
-    1. keyword: 基于关键词和正则表达式匹配
-    2. llm: 基于LLM的语义理解（需要LLM实例）
-    3. hybrid: 先关键词匹配，低置信度时回退到LLM
+    工作流程：
+    1. 快速关键词匹配（高置信度直接返回）
+    2. 否则调用LLM Function Calling识别
     """
 
-    def __init__(self, llm=None, mode: str = "keyword"):
+    def __init__(self, llm=None, keyword_threshold: float = 0.7):
         """
         初始化意图识别器
 
         Args:
-            llm: LLM实例（可选，用于hybrid/llm模式）
-            mode: 识别模式 (keyword/llm/hybrid)
+            llm: LLM实例（可选，默认自动创建）
+            keyword_threshold: 关键词匹配置信度阈值
         """
-        self.llm = llm
-        self.mode = mode
+        self.llm = llm or get_llm()
+        self.keyword_threshold = keyword_threshold
         self._keyword_rules = INTENT_KEYWORDS
 
-        logger.info(f"意图识别器初始化: mode={mode}")
+        logger.info(f"意图识别器初始化: Function Calling模式")
 
-    def recognize(self, text: str, context: Optional[Dict[str, Any]] = None) -> Intent:
+    async def recognize(self, text: str, context: Optional[Dict[str, Any]] = None) -> Intent:
         """
         识别用户意图
 
@@ -205,26 +215,18 @@ class IntentRecognizer:
 
         text = text.strip()
 
-        if self.mode == "keyword":
-            return self._recognize_by_keywords(text, context)
-        elif self.mode == "llm":
-            return self._recognize_by_llm(text, context)
-        elif self.mode == "hybrid":
-            keyword_intent = self._recognize_by_keywords(text, context)
-            if keyword_intent.confidence >= 0.6:
-                return keyword_intent
-            # 低置信度时尝试LLM
-            if self.llm:
-                llm_intent = self._recognize_by_llm(text, context)
-                if llm_intent.confidence > keyword_intent.confidence:
-                    return llm_intent
+        # 1. 快速关键词匹配
+        keyword_intent = self._recognize_by_keywords(text, context)
+        if keyword_intent.confidence >= self.keyword_threshold:
+            logger.debug(f"关键词匹配成功: {keyword_intent.type.value} ({keyword_intent.confidence:.2f})")
             return keyword_intent
-        else:
-            return self._recognize_by_keywords(text, context)
+
+        # 2. 调用LLM Function Calling
+        return await self._recognize_by_function_calling(text, context)
 
     def _recognize_by_keywords(self, text: str, context: Optional[Dict[str, Any]] = None) -> Intent:
         """
-        基于关键词的意图识别
+        基于关键词的快速意图识别
 
         Args:
             text: 用户输入文本
@@ -256,13 +258,6 @@ class IntentRecognizer:
         # 归一化置信度到 0-1 范围
         confidence = min(best_score / 10.0, 1.0)
 
-        # 如果是合同审查意图，检查文本长度
-        if best_intent_type == IntentType.CONTRACT_REVIEW:
-            min_length = self._keyword_rules[IntentType.CONTRACT_REVIEW].get("min_text_length", 0)
-            if min_length > 0 and len(text) < min_length:
-                # 文本太短，降低置信度（但不降级意图类型，因为用户可能只是简短描述）
-                confidence *= 0.6
-
         return Intent(
             type=best_intent_type,
             confidence=confidence,
@@ -278,52 +273,45 @@ class IntentRecognizer:
         rules: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None
     ) -> Tuple[float, Dict[str, Any]]:
-        """
-        为某个意图打分
-
-        Returns:
-            (score, entities): 分数和提取的实体
-        """
+        """为某个意图打分"""
         score = 0.0
         entities = {}
         priority = rules.get("priority", 1)
 
-        # 1. 关键词匹配
+        # 关键词匹配
         keywords = rules.get("keywords", [])
         for keyword in keywords:
             if keyword.lower() in text_lower:
                 score += 2.0
                 entities["matched_keyword"] = keyword
 
-        # 2. 正则模式匹配（更高权重）
+        # 正则模式匹配（更高权重）
         patterns = rules.get("patterns", [])
         for pattern in patterns:
             match = re.search(pattern, text)
             if match:
                 score += 3.0
                 entities["matched_pattern"] = pattern
-                # 提取捕获组作为实体
                 if match.groups():
                     entities["extracted"] = match.groups()
 
-        # 3. 上下文加成
+        # 上下文加成
         if context:
             last_intent = context.get("last_intent")
             if last_intent and last_intent == rules.get("type", ""):
-                score += 1.0  # 连续意图加成
+                score += 1.0
 
-            # 如果上下文中有合同文本，合同审查意图加分
             if context.get("has_contract_text") and score > 0:
                 score += 0.5
 
-        # 4. 应用优先级权重
+        # 应用优先级权重
         score *= (priority / 10.0)
 
         return score, entities
 
-    def _recognize_by_llm(self, text: str, context: Optional[Dict[str, Any]] = None) -> Intent:
+    async def _recognize_by_function_calling(self, text: str, context: Optional[Dict[str, Any]] = None) -> Intent:
         """
-        基于LLM的意图识别
+        基于Function Calling的意图识别
 
         Args:
             text: 用户输入文本
@@ -332,134 +320,71 @@ class IntentRecognizer:
         Returns:
             Intent: 识别结果
         """
-        if not self.llm:
-            logger.warning("LLM未初始化，回退到关键词识别")
-            return self._recognize_by_keywords(text, context)
-
         try:
-            from langchain_core.messages import SystemMessage, HumanMessage
+            from langchain_core.messages import HumanMessage
 
-            intent_descriptions = "\n".join([
-                f"- {t.value}: {self._get_intent_description(t)}"
-                for t in IntentType
-            ])
-
-            system_prompt = f"""你是一个意图识别专家。根据用户输入，识别用户的意图。
-
-可选意图类型：
-{intent_descriptions}
-
-输出格式（JSON）：
-{{
-    "intent": "意图类型",
-    "confidence": 0.0-1.0,
-    "entities": {{}}
-}}
-
-只输出JSON，不要其他内容。"""
-
+            # 构建上下文信息
             context_str = ""
             if context:
                 if context.get("last_intent"):
                     context_str += f"\n上一轮意图: {context['last_intent']}"
                 if context.get("has_contract_text"):
                     context_str += "\n已有合同文本: 是"
+                if context.get("turn_count", 0) > 0:
+                    context_str += f"\n对话轮数: {context['turn_count']}（说明之前已有交互）"
 
-            human_prompt = f"用户输入: {text}{context_str}\n\n请识别意图。"
+            # 构建意图描述
+            intent_list = "\n".join([
+                f"- {t.value}: {INTENT_DESCRIPTIONS[t]}"
+                for t in IntentType if t != IntentType.UNKNOWN
+            ])
+
+            # 使用with_structured_output获取结构化输出
+            structured_llm = self.llm.with_structured_output(IntentResult)
 
             messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=human_prompt)
+                HumanMessage(content=f"""你是一个意图识别专家。根据用户输入和上下文，识别用户的意图。
+
+重要规则：
+- 如果用户在追问之前分析过什么合同、结果是什么、哪个合同等，应该识别为 question_answer
+- 只有当用户明确要求对合同进行审查/分析/评估时，才识别为 contract_review
+- 关注"之前"、"刚才"、"哪一份"等表示追问的词汇
+
+可选意图类型：
+{intent_list}
+{context_str}
+
+用户输入: {text}""")
             ]
 
-            response = self.llm.invoke(messages)
-            content = extract_llm_content(response.content)
-
-            # 尝试解析JSON
-            result = parse_json_from_llm(content)
-
-            # 如果解析结果不是dict，使用默认值
-            if not isinstance(result, dict):
-                result = {"intent": "unknown", "confidence": 0.5}
-
-            intent_type_str = result.get("intent", "unknown")
-            try:
-                intent_type = IntentType(intent_type_str)
-            except ValueError:
-                intent_type = IntentType.UNKNOWN
+            # 调用LLM
+            result = await structured_llm.ainvoke(messages)
 
             return Intent(
-                type=intent_type,
-                confidence=float(result.get("confidence", 0.5)),
-                entities=result.get("entities", {}),
+                type=result.intent,
+                confidence=result.confidence,
+                entities=result.entities,
                 raw_text=text,
-                method="llm"
+                method="function_calling",
+                reasoning=result.reasoning
             )
 
         except Exception as e:
-            logger.warning(f"LLM意图识别失败，回退到关键词: {e}")
-            return self._recognize_by_keywords(text, context)
-
-    def _get_intent_description(self, intent_type: IntentType) -> str:
-        """获取意图类型的描述"""
-        descriptions = {
-            IntentType.CONTRACT_REVIEW: "完整合同审查（解析、分析、评估、检查、报告）",
-            IntentType.CLAUSE_ANALYSIS: "分析具体条款的内容和含义",
-            IntentType.RISK_ASSESSMENT: "评估合同中的风险点",
-            IntentType.COMPLIANCE_CHECK: "检查合同是否符合法律法规",
-            IntentType.REPORT_GENERATION: "生成审查报告",
-            IntentType.QUESTION_ANSWER: "回答关于合同的问题",
-            IntentType.GREETING: "问候语",
-            IntentType.UNKNOWN: "无法识别的意图",
-        }
-        return descriptions.get(intent_type, "未知意图")
+            logger.warning(f"Function Calling意图识别失败，回退到关键词: {e}")
+            # 回退到关键词匹配
+            keyword_intent = self._recognize_by_keywords(text, context)
+            keyword_intent.confidence = max(keyword_intent.confidence, 0.3)
+            return keyword_intent
 
     def get_supported_intents(self) -> List[Dict[str, str]]:
         """获取支持的意图列表"""
         return [
-            {"type": t.value, "description": self._get_intent_description(t)}
+            {"type": t.value, "description": INTENT_DESCRIPTIONS[t]}
             for t in IntentType
         ]
 
-    def add_keyword_rule(
-        self,
-        intent_type: IntentType,
-        keywords: List[str] = None,
-        patterns: List[str] = None,
-        priority: int = 5
-    ):
-        """
-        添加自定义关键词规则
-
-        Args:
-            intent_type: 意图类型
-            keywords: 关键词列表
-            patterns: 正则模式列表
-            priority: 优先级
-        """
-        if intent_type not in self._keyword_rules:
-            self._keyword_rules[intent_type] = {
-                "keywords": [],
-                "patterns": [],
-                "priority": priority
-            }
-
-        if keywords:
-            self._keyword_rules[intent_type]["keywords"].extend(keywords)
-        if patterns:
-            self._keyword_rules[intent_type]["patterns"].extend(patterns)
-
-        logger.info(f"添加关键词规则: {intent_type.value}")
-
-    def batch_recognize(self, texts: List[str], context: Optional[Dict[str, Any]] = None) -> List[Intent]:
-        """
-        批量意图识别
-
-        Args:
-            texts: 文本列表
-            context: 上下文信息
-
-        Returns:
-            意图列表
-        """
-        return [self.recognize(text, context) for text in texts]
+    async def batch_recognize(self, texts: List[str], context: Optional[Dict[str, Any]] = None) -> List[Intent]:
+        """批量意图识别"""
+        import asyncio
+        tasks = [self.recognize(text, context) for text in texts]
+        return await asyncio.gather(*tasks)

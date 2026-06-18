@@ -39,12 +39,19 @@ class Settings(BaseSettings):
     RABBITMQ_QUEUE: str = Field(default="contract_review", description="任务队列名称")
     RABBITMQ_URL: Optional[str] = Field(default=None, description="RabbitMQ连接URL（优先使用）")
 
+    # Embedding配置
+    EMBEDDING_MODEL: str = Field(default="bge-m3:latest", description="嵌入模型")
+    EMBEDDING_URL: str = Field(default="http://10.0.81.167:11434/api/embed", description="Embedding服务地址")
+    EMBEDDING_VECTOR_SIZE: int = Field(default=1024, description="向量维度")
+
     # Qdrant向量数据库配置
-    QDRANT_URL: str = Field(default="http://localhost:6333", description="Qdrant服务地址")
-    QDRANT_COLLECTION_REGULATIONS: str = Field(default="contract_regulations", description="法规集合名称")
-    QDRANT_COLLECTION_CASES: str = Field(default="legal_cases", description="案例集合名称")
+    QDRANT_URL: str = Field(default="http://192.168.70.57:6333", description="Qdrant服务地址")
+    QDRANT_COLLECTION_REGULATIONS: str = Field(default="entities_multi_vector_v2", description="法规集合名称")
+    QDRANT_COLLECTION_CASES: str = Field(default="entities_multi_vector_authority", description="案例集合名称")
     QDRANT_COLLECTION_MEMORY: str = Field(default="long_term_memory", description="长期记忆集合名称")
-    EMBEDDING_MODEL: str = Field(default="all-MiniLM-L6-v2", description="嵌入模型")
+    QDRANT_SCORE_THRESHOLD: float = Field(default=0.5, description="相似度阈值")
+    QDRANT_VECTOR_WEIGHT: float = Field(default=0.6, description="向量权重")
+    QDRANT_KEYWORD_WEIGHT: float = Field(default=0.4, description="关键词权重")
 
     # 文档处理配置
     MAX_FILE_SIZE_MB: int = Field(default=50, description="最大文件大小(MB)")
