@@ -145,9 +145,12 @@ class RiskAssessmentAgent(BaseAgent):
                 return result
         except Exception as e:
             logger.error(f"LLM风险评估失败: {e}")
-
-        # 回退到基础评估
-        return self._assess_with_regex(text)
+            return {
+                "risk_level": "unknown",
+                "risks": [],
+                "recommendations": [],
+                "summary": {"total_risks": 0, "error": str(e)}
+            }
 
     def quantify_risk(self, risks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -285,43 +288,3 @@ class RiskAssessmentAgent(BaseAgent):
             return json.loads(fixed)
         except json.JSONDecodeError:
             return None
-
-    def _assess_with_regex(self, text: str) -> Dict[str, Any]:
-        """正则回退评估"""
-        risks = []
-
-        # 简单的风险检测
-        risk_patterns = [
-            (r"无限责任", "无限责任风险", "high"),
-            (r"单方面?解除", "单方解除风险", "high"),
-            (r"自动续约", "自动续约风险", "medium"),
-            (r"永久保密", "保密期限过长", "medium"),
-        ]
-
-        for pattern, name, severity in risk_patterns:
-            if re.search(pattern, text):
-                risks.append({
-                    "name": name,
-                    "severity": severity,
-                    "category": "other",
-                    "description": f"检测到{name}",
-                    "suggestion": "建议修改相关条款"
-                })
-
-        risk_level = "low"
-        if any(r["severity"] == "high" for r in risks):
-            risk_level = "high"
-        elif any(r["severity"] == "medium" for r in risks):
-            risk_level = "medium"
-
-        return {
-            "risk_level": risk_level,
-            "risks": risks,
-            "recommendations": [],
-            "summary": {
-                "total_risks": len(risks),
-                "high_risks": len([r for r in risks if r["severity"] == "high"]),
-                "medium_risks": len([r for r in risks if r["severity"] == "medium"]),
-                "low_risks": len([r for r in risks if r["severity"] == "low"]),
-            }
-        }

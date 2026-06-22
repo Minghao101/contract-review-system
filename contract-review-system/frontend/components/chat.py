@@ -31,6 +31,9 @@ def render_chat_interface():
         st.session_state["review_result"] = None
     if "_displayed_indices" not in st.session_state:
         st.session_state["_displayed_indices"] = set()
+    if "session_id" not in st.session_state:
+        import uuid
+        st.session_state["session_id"] = str(uuid.uuid4())
 
     # 每次脚本执行开始时清除已显示标记，确保消息正常渲染
     # _displayed_indices 仅用于当前执行中防止流式输出/错误消息重复渲染
@@ -218,40 +221,40 @@ def _query_memory(query: str):
 
 def _process_with_backend(contract_text: str, question: str, file_name: str):
     """调用后端处理 - 支持流式输出"""
-    # 先同步调用获取完整结果（用于历史记录保存）
     with st.spinner("🔄 正在分析..."):
         try:
             response = requests.post(
-                f"{API_BASE_URL}/review/sync",
+                f"{API_BASE_URL}/review/stream",
                 json={
                     "contract_text": contract_text,
                     "contract_type": "general",
                     "review_focus": [question],
-                    "contract_name": file_name
+                    "contract_name": file_name,
+                    "session_id": st.session_state.get("session_id")
                 },
-                timeout=300
+                timeout=300,
+                stream=True
             )
 
             if response.status_code == 200:
-                result = response.json()
-                st.session_state["review_result"] = result
+                # 读取流式响应的完整文本
+                full_text = response.text
+
+                st.session_state["review_result"] = {"raw_text": full_text}
 
                 # 保存到历史记录
                 if "review_history" not in st.session_state:
                     st.session_state["review_history"] = []
                 st.session_state["review_history"].append({
                     "contract_name": file_name,
-                    "status": result.get("status", "completed"),
+                    "status": "completed",
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "result": result,
+                    "result": {"raw_text": full_text},
                     "question": question
                 })
 
-                # 格式化回答
-                answer = _format_answer(result, question, file_name)
-
-                # 流式输出 - 逐块显示
-                _stream_answer(answer)
+                # 流式输出
+                _stream_answer(full_text)
 
                 return
             else:
@@ -300,12 +303,11 @@ def _process_with_backend(contract_text: str, question: str, file_name: str):
 def _stream_answer(answer: str):
     """将回答以流式方式逐块输出到聊天界面"""
     def _text_generator():
-        """逐块生成文本，模拟流式输出"""
+        """逐块生成文本"""
         lines = answer.split("\n")
         for i, line in enumerate(lines):
             chunk = line + ("\n" if i < len(lines) - 1 else "")
             yield chunk
-            time.sleep(0.02)
 
     with st.chat_message("assistant", avatar="🤖"):
         st.write_stream(_text_generator())
@@ -326,7 +328,7 @@ def _to_str(item) -> str:
     if isinstance(item, str):
         return item
     if isinstance(item, dict):
-        for key in ("description", "text", "title", "content", "summary"):
+        for key in ("description", "text", "title", "content", "summary", "suggestion"):
             val = item.get(key)
             if isinstance(val, str) and val:
                 return val
@@ -334,8 +336,27 @@ def _to_str(item) -> str:
     return str(item)
 
 
+def _parse_rec(item):
+    """尝试将recommendation项解析为dict，兼容字符串形式的JSON"""
+    if isinstance(item, dict):
+        return item
+    if isinstance(item, str):
+        import json as _json
+        try:
+            parsed = _json.loads(item)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    return None
+
+
 def _format_answer(result: dict, question: str, file_name: str) -> str:
     """根据审查结果和用户问题，格式化回答"""
+    # 如果是追问类回答（question_answer），直接返回 response
+    if result.get("response") and not result.get("risks") and not result.get("document_info"):
+        return result["response"]
+
     lines = [f"针对您的问题「{question}」，以下是分析结果：\n"]
 
     # 文档基本信息
@@ -354,11 +375,12 @@ def _format_answer(result: dict, question: str, file_name: str) -> str:
     if result.get("risks"):
         lines.append("### ⚠️ 风险评估")
         for r in result["risks"]:
-            if isinstance(r, dict):
-                level = r.get("level", r.get("severity", "medium"))
+            r_dict = _parse_rec(r)
+            if r_dict:
+                level = r_dict.get("level", r_dict.get("severity", "medium"))
                 emoji = {"high": "🔴", "critical": "🔴", "medium": "🟡", "low": "🟢"}.get(level, "⚪")
-                title = _to_str(r.get("title", r.get("name", "风险")))
-                desc = _to_str(r.get("description", ""))[:150]
+                title = _to_str(r_dict.get("title", r_dict.get("name", "风险")))
+                desc = _to_str(r_dict.get("description", ""))[:150]
                 lines.append(f"- {emoji} **{title}**: {desc}")
             else:
                 lines.append(f"- ⚠️ {_to_str(r)}")
@@ -368,7 +390,21 @@ def _format_answer(result: dict, question: str, file_name: str) -> str:
     if result.get("compliance_violations"):
         lines.append("### ✅ 合规问题")
         for v in result["compliance_violations"]:
-            lines.append(f"- ⚠️ {_to_str(v)}")
+            v_dict = _parse_rec(v)
+            if v_dict:
+                severity = v_dict.get("severity", "medium")
+                emoji = {"high": "🔴", "critical": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
+                clause = _to_str(v_dict.get("clause", ""))
+                regulation = v_dict.get("regulation", "")
+                suggestion = _to_str(v_dict.get("suggestion", ""))
+                if clause:
+                    lines.append(f"- {emoji} **{clause}**")
+                if regulation:
+                    lines.append(f"  违规: {regulation}")
+                if suggestion:
+                    lines.append(f"  建议: {suggestion}")
+            else:
+                lines.append(f"- ⚠️ {_to_str(v)}")
         lines.append("")
 
     if result.get("missing_clauses"):
@@ -394,7 +430,12 @@ def _format_answer(result: dict, question: str, file_name: str) -> str:
                 lines.append("")
                 lines.append("**关键建议:**")
                 for rec in analysis["key_recommendations"]:
-                    lines.append(f"- {_to_str(rec)}")
+                    rec_dict = _parse_rec(rec)
+                    if rec_dict:
+                        suggestion = _to_str(rec_dict.get("suggestion", rec_dict.get("description", rec)))
+                        lines.append(f"- {suggestion}")
+                    else:
+                        lines.append(f"- {_to_str(rec)}")
             lines.append("")
 
     # 报告摘要
@@ -417,7 +458,21 @@ def _format_answer(result: dict, question: str, file_name: str) -> str:
     if result.get("recommendations"):
         lines.append("### 💡 建议")
         for rec in result["recommendations"]:
-            lines.append(f"- {_to_str(rec)}")
+            rec_dict = _parse_rec(rec)
+            if rec_dict:
+                priority = rec_dict.get("priority", "medium")
+                emoji = {"high": "🔴", "critical": "🔴", "medium": "🟡", "low": "🟢"}.get(priority, "⚪")
+                category = rec_dict.get("category", "")
+                suggestion = _to_str(rec_dict.get("suggestion", rec_dict.get("description", "")))
+                reason = rec_dict.get("reason", "")
+                if category:
+                    lines.append(f"- {emoji} **[{priority}] {category}**: {suggestion}")
+                else:
+                    lines.append(f"- {emoji} **[{priority}]**: {suggestion}")
+                if reason:
+                    lines.append(f"  原因: {reason}")
+            else:
+                lines.append(f"- {_to_str(rec)}")
 
     if len(lines) <= 1:
         lines.append("分析完成，但未找到相关信息。")

@@ -54,6 +54,8 @@ def _new_conversation():
     st.session_state["uploaded_file_name"] = None
     st.session_state["review_result"] = None
     st.session_state["_displayed_indices"] = set()
+    import uuid
+    st.session_state["session_id"] = str(uuid.uuid4())
     st.rerun()
 
 
@@ -190,6 +192,8 @@ def _clear_all():
     st.session_state["uploaded_file_name"] = None
     st.session_state["review_result"] = None
     st.session_state["_displayed_indices"] = set()
+    import uuid
+    st.session_state["session_id"] = str(uuid.uuid4())
     st.rerun()
 
 

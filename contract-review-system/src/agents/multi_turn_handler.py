@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from .base_agent import BaseAgent
 from .intent_recognizer import IntentRecognizer, IntentType, Intent
 from .conversation_context import ConversationContext, ConversationManager, ConversationState
+from src.utils.llm_factory import get_llm
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +178,7 @@ class MultiTurnHandler:
         # 8. 处理问候、未知意图和问题回答（不需要Agent）
         if routing_info.get("direct_response"):
             if intent.type == IntentType.QUESTION_ANSWER:
-                response = self._answer_from_context(user_message, ctx)
+                response = await self._answer_from_context(user_message, ctx)
             else:
                 response = self._get_direct_response(intent.type)
             ctx.add_assistant_message(response)
@@ -257,9 +258,9 @@ class MultiTurnHandler:
             "- 问我关于合同的问题"
         )
 
-    def _answer_from_context(self, user_message: str, ctx: ConversationContext) -> str:
+    async def _answer_from_context(self, user_message: str, ctx: ConversationContext) -> str:
         """
-        基于上下文回答用户问题（不需要调用Agent）
+        基于上下文回答用户问题（使用LLM理解对话历史）
 
         Args:
             user_message: 用户问题
@@ -268,82 +269,64 @@ class MultiTurnHandler:
         Returns:
             回复文本
         """
-        all_results = ctx.get_all_results()
+        logger.info(f"追问处理: message={user_message[:50]}, session={ctx.session_id}")
+
+        # 如果没有任何对话历史，提示用户
+        messages = ctx.get_messages()
+        logger.info(f"上下文消息数: {len(messages)}")
+        if not messages:
+            return "目前还没有进行过对话。请先上传合同文件，然后我可以帮你分析。"
+
+        # 构建上下文：合同内容 + 对话历史
+        context_parts = []
+
+        # 1. 合同内容
         contract_text = ctx.get_contract_text()
-
-        # 如果没有任何分析结果，提示用户
-        if not all_results:
-            return "目前还没有进行过合同分析。请先上传合同文件，然后我可以帮你分析。"
-
-        # 根据问题关键词，从上下文中提取答案
-        msg = user_message.lower()
-
-        # 询问之前分析的合同
-        if any(kw in msg for kw in ["哪一份", "哪个合同", "什么合同", "之前解析", "刚才分析"]):
-            # 从 document_parser 结果中提取合同信息
-            if "document_parser" in all_results:
-                doc_result = all_results["document_parser"]
-                if isinstance(doc_result, dict):
-                    doc_info = doc_result.get("document_info", {})
-                    basic_info = doc_info.get("basic_info", {})
-                    parties = basic_info.get("parties", [])
-                    contract_type = doc_info.get("contract_type", "未知")
-                    title = basic_info.get("title", "未知")
-
-                    response = "📋 之前分析的合同信息：\n\n"
-                    if title and title != "未知":
-                        response += f"- **标题**: {title}\n"
-                    response += f"- **合同类型**: {contract_type}\n"
-                    if parties:
-                        response += f"- **当事方**: {', '.join(parties)}\n"
-                    response += "\n如需进一步分析，请告诉我具体需求。"
-                    return response
-
-        # 询问风险评估结果
-        if any(kw in msg for kw in ["风险", "风险等级", "风险情况"]):
-            if "risk_assessor" in all_results:
-                risk_result = all_results["risk_assessor"]
-                if isinstance(risk_result, dict):
-                    risk_level = risk_result.get("risk_level", "未知")
-                    risks = risk_result.get("risks", [])
-                    level_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(risk_level, "⚪")
-                    response = f"⚠️ 风险评估结果 {level_emoji}\n\n"
-                    response += f"**整体风险等级**: {risk_level.upper()}\n\n"
-                    for i, risk in enumerate(risks[:5], 1):
-                        emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(risk.get("severity"), "⚪")
-                        response += f"{i}. {emoji} {risk.get('name', '风险')}\n"
-                    if len(risks) > 5:
-                        response += f"\n...共 {len(risks)} 项风险"
-                    return response
-
-        # 询问合规情况
-        if any(kw in msg for kw in ["合规", "合法", "合规性"]):
-            if "compliance_checker" in all_results:
-                comp_result = all_results["compliance_checker"]
-                if isinstance(comp_result, dict):
-                    status = comp_result.get("compliance_status", "未知")
-                    score = comp_result.get("score", 0)
-                    violations = comp_result.get("compliance_violations", [])
-                    response = f"✅ 合规检查结果\n\n"
-                    response += f"- **合规状态**: {status}\n"
-                    response += f"- **合规评分**: {score}/100\n"
-                    if violations:
-                        response += f"- **违规问题**: {len(violations)} 项\n"
-                    missing = comp_result.get("missing_clauses", [])
-                    if missing:
-                        response += f"- **缺失条款**: {len(missing)} 项\n"
-                    return response
-
-        # 默认：提供上下文摘要
-        response = "📊 当前分析上下文：\n\n"
-        response += f"- 已完成的分析: {', '.join(all_results.keys())}\n"
         if contract_text:
-            response += f"- 合同文本: {len(contract_text)} 字符\n"
-        response += "\n您可以问我：\n"
-        response += "- 这份合同有什么风险？\n"
-        response += "- 合规性检查结果如何？\n"
-        response += "- 之前分析的是哪份合同？\n"
-        return response
+            context_parts.append(f"=== 合同内容 ===\n{contract_text[:3000]}")
+            logger.info(f"合同内容: {len(contract_text)}字")
+        else:
+            logger.warning("未找到合同内容")
+
+        # 2. 对话历史
+        context_parts.append("\n=== 对话历史 ===")
+        for msg in messages:
+            role = "用户" if msg["role"] == "user" else "助手"
+            context_parts.append(f"{role}: {msg['content'][:500]}")
+
+        context_str = "\n".join(context_parts)
+
+        # 调用LLM回答
+        try:
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            llm = get_llm()
+            messages = [
+                SystemMessage(content="""你是一个合同审查助手。用户之前已经对合同进行了分析，现在在追问细节。
+
+规则：
+1. 根据提供的合同内容和对话历史回答用户问题
+2. 对话历史中助手的回复包含了之前的分析结果，直接引用即可
+3. 回答要简洁明了，直接回答问题
+4. 如果上下文中没有相关信息，如实告知"""),
+                HumanMessage(content=f"""{context_str}
+
+用户问题：{user_message}""")
+            ]
+
+            response = await llm.ainvoke(messages)
+            content = response.content
+            # LLM可能返回content blocks列表（如thinking + text），提取文本部分
+            if isinstance(content, list):
+                text_parts = [block.get("text", "") for block in content
+                              if isinstance(block, dict) and block.get("type") == "text"]
+                content = "\n".join(text_parts) if text_parts else str(content)
+            logger.info(f"LLM回答完成: {len(content)}字")
+            return content
+
+        except Exception as e:
+            logger.error(f"LLM回答失败: {e}", exc_info=True)
+            return f"抱歉，回答问题时出现错误。您可以尝试重新提问。"
 
     def _inject_follow_up_context(
         self,

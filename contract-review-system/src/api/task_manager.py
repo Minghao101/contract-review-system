@@ -237,6 +237,7 @@ class TaskManager:
         contract_type: str = "general",
         review_focus: list = None,
         contract_name: str = "未命名合同",
+        session_id: str = None,
     ) -> Dict[str, Any]:
         """
         同步处理任务
@@ -246,14 +247,19 @@ class TaskManager:
             contract_type: 合同类型
             review_focus: 审查重点
             contract_name: 合同名称
+            session_id: 会话ID（用于多轮对话）
 
         Returns:
             审查结果（扁平化，前端可直接使用顶层key）
         """
+        # 使用提供的session_id，或生成一个
+        if not session_id:
+            session_id = f"sync_{contract_name}_{uuid.uuid4().hex[:8]}"
+
         # 使用MultiTurnHandler直接执行Agent
         handler_result = await self._handler.handle_message(
-            session_id=f"sync_{contract_name}",
-            user_message="审查合同",
+            session_id=session_id,
+            user_message=review_focus[0] if review_focus else "审查合同",
             contract_text=contract_text,
             file_info={"contract_type": contract_type}
         )
@@ -283,15 +289,16 @@ class TaskManager:
         MultiTurnHandler返回: {agent_name: {status, result: {actual_data}}}
         扁平化后返回: {actual_data_keys...}
         """
-        agent_results = handler_result.get("result", {})
+        agent_results = handler_result.get("result") or {}
         flat = {}
 
         # 提取各agent的实际结果
-        for agent_name, agent_data in agent_results.items():
-            if isinstance(agent_data, dict) and agent_data.get("status") == "completed":
-                actual = agent_data.get("result", {})
-                if isinstance(actual, dict):
-                    flat.update(actual)
+        if isinstance(agent_results, dict):
+            for agent_name, agent_data in agent_results.items():
+                if isinstance(agent_data, dict) and agent_data.get("status") == "completed":
+                    actual = agent_data.get("result", {})
+                    if isinstance(actual, dict):
+                        flat.update(actual)
 
         # 保留元信息
         flat["status"] = handler_result.get("intent", {}).get("type", "contract_review")

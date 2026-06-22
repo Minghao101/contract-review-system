@@ -215,24 +215,25 @@ class ConversationContext:
     # ==================== Agent结果管理 ====================
 
     def set_agent_result(self, agent_name: str, result: Dict[str, Any]):
-        """设置Agent执行结果"""
+        """设置Agent执行结果（存储在当前轮次中）"""
         if self._current_turn:
             self._current_turn.agent_results[agent_name] = result
-        self._shared_data[f"result_{agent_name}"] = result
 
         logger.debug(f"Agent结果: {agent_name}")
 
     def get_agent_result(self, agent_name: str) -> Optional[Dict[str, Any]]:
-        """获取Agent执行结果"""
-        return self._shared_data.get(f"result_{agent_name}")
+        """获取最近一次Agent执行结果"""
+        for turn in reversed(self._turns):
+            if agent_name in turn.agent_results:
+                return turn.agent_results[agent_name]
+        return None
 
     def get_all_results(self) -> Dict[str, Any]:
-        """获取所有Agent结果"""
+        """获取所有轮次的Agent结果（后轮覆盖前轮同名Agent）"""
         results = {}
-        for key, value in self._shared_data.items():
-            if key.startswith("result_"):
-                agent_name = key[7:]  # 去掉 "result_" 前缀
-                results[agent_name] = value
+        for turn in self._turns:
+            for agent_name, result in turn.agent_results.items():
+                results[agent_name] = result
         return results
 
     # ==================== 文件管理 ====================

@@ -3,12 +3,14 @@ API路由模块
 """
 from typing import Optional
 from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
+import logging
 
 from .task_manager import get_task_manager
 from .document_parser import DocumentParser
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # 获取全局任务管理器实例
@@ -22,6 +24,7 @@ class ContractReviewRequest(BaseModel):
     review_focus: Optional[list] = Field(default=[], description="审查重点")
     callback_url: Optional[str] = Field(default=None, description="回调URL")
     contract_name: Optional[str] = Field(default="未命名合同", description="合同名称")
+    session_id: Optional[str] = Field(default=None, description="会话ID（用于多轮对话）")
 
 
 class TaskResponse(BaseModel):
@@ -85,6 +88,7 @@ async def submit_review_sync(request: ContractReviewRequest):
             contract_type=request.contract_type,
             review_focus=request.review_focus,
             contract_name=request.contract_name,
+            session_id=request.session_id,
         )
         return result
     except Exception as e:
@@ -94,68 +98,45 @@ async def submit_review_sync(request: ContractReviewRequest):
 @router.post("/review/stream")
 async def review_stream(request: ContractReviewRequest):
     """
-    流式合同审查（SSE）
+    流式合同审查
 
-    先处理完所有Agent，然后流式返回格式化结果
+    处理完所有Agent后返回格式化结果，前端使用st.write_stream模拟流式显示
     """
-    import queue
-    import threading
+    import traceback as _tb
+    try:
+        result = await task_manager.process_sync(
+            contract_text=request.contract_text,
+            contract_type=request.contract_type,
+            review_focus=request.review_focus,
+            contract_name=request.contract_name,
+            session_id=request.session_id,
+        )
 
-    q = queue.Queue()
+        # 格式化结果
+        formatted = _format_stream_result(result, request.review_focus)
 
-    def producer():
-        try:
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result = loop.run_until_complete(
-                    task_manager.process_sync(
-                        contract_text=request.contract_text,
-                        contract_type=request.contract_type,
-                        review_focus=request.review_focus,
-                    )
-                )
-            finally:
-                loop.close()
-
-            # 格式化结果
-            formatted = _format_stream_result(result, request.review_focus)
-            # 分块发送
-            chunk_size = 50
-            for i in range(0, len(formatted), chunk_size):
-                q.put(formatted[i:i + chunk_size])
-        except Exception as e:
-            q.put(f"\n\n错误: {str(e)}")
-        finally:
-            q.put(None)  # 结束信号
-
-    def stream_generator():
-        while True:
-            try:
-                chunk = q.get(timeout=30)
-                if chunk is None:
-                    break
-                yield chunk
-            except queue.Empty:
-                break
-
-    thread = threading.Thread(target=producer, daemon=True)
-    thread.start()
-
-    return StreamingResponse(
-        stream_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        }
-    )
+        return Response(
+            content=formatted,
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            }
+        )
+    except Exception as e:
+        logger.error(f"审查请求失败: {e}\n{_tb.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def _format_stream_result(result: dict, review_focus: list = None) -> str:
     """将审查结果格式化为流式文本"""
+    # 如果是追问类回答（question_answer），直接返回 response
+    if result.get("response") and not result.get("risks") and not result.get("document_info"):
+        response = result["response"]
+        if not isinstance(response, str):
+            response = str(response)
+        return response
+
     lines = []
     focus = review_focus[0] if review_focus else "合同审查"
     lines.append(f"针对您的问题「{focus}」，以下是分析结果：\n")
@@ -208,10 +189,32 @@ def _format_stream_result(result: dict, review_focus: list = None) -> str:
     if result.get("recommendations"):
         lines.append("### 💡 建议")
         for rec in result["recommendations"]:
-            if isinstance(rec, str):
+            rec_dict = None
+            if isinstance(rec, dict):
+                rec_dict = rec
+            elif isinstance(rec, str):
+                try:
+                    import json as _json
+                    parsed = _json.loads(rec)
+                    if isinstance(parsed, dict):
+                        rec_dict = parsed
+                except Exception:
+                    pass
+
+            if rec_dict:
+                priority = rec_dict.get("priority", "medium")
+                emoji = {"high": "🔴", "critical": "🔴", "medium": "🟡", "low": "🟢"}.get(priority, "⚪")
+                category = rec_dict.get("category", "")
+                suggestion = rec_dict.get("suggestion", rec_dict.get("description", ""))
+                reason = rec_dict.get("reason", "")
+                if category:
+                    lines.append(f"- {emoji} **[{priority}] {category}**: {suggestion}")
+                else:
+                    lines.append(f"- {emoji} **[{priority}]**: {suggestion}")
+                if reason:
+                    lines.append(f"  原因: {reason}")
+            else:
                 lines.append(f"- {rec}")
-            elif isinstance(rec, dict):
-                lines.append(f"- {rec.get('title', rec.get('description', str(rec)))}")
 
     if len(lines) <= 1:
         lines.append("分析完成，但未找到相关信息。")

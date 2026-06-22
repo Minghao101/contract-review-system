@@ -147,9 +147,23 @@ class ComplianceCheckerAgent(BaseAgent):
                 return self._validate_result(result, contract_type)
         except Exception as e:
             logger.error(f"LLM合规检查失败: {e}")
+            return {
+                "compliance_status": "unknown",
+                "checked_regulations": [],
+                "missing_clauses": [],
+                "compliance_violations": [],
+                "score": 0,
+                "summary": {"total_checked": 0, "error": str(e)},
+            }
 
-        # 回退到规则检查
-        return self._check_with_rules(text, contract_type)
+        return {
+            "compliance_status": "unknown",
+            "checked_regulations": [],
+            "missing_clauses": [],
+            "compliance_violations": [],
+            "score": 0,
+            "summary": {"total_checked": 0},
+        }
 
     def _parse_json(self, content: str) -> Any:
         """容错JSON解析"""
@@ -179,118 +193,11 @@ class ComplianceCheckerAgent(BaseAgent):
 
     def _validate_result(self, result: Dict[str, Any], contract_type: str) -> Dict[str, Any]:
         """验证并标准化LLM结果"""
-        # 确保必要字段存在
         result.setdefault("compliance_status", "partial")
         result.setdefault("checked_regulations", [])
         result.setdefault("missing_clauses", [])
         result.setdefault("compliance_violations", [])
         result.setdefault("score", 0)
         result.setdefault("summary", {})
-
-        # 自动检查必备条款缺失
-        required = self.REQUIRED_CLAUSES.get(contract_type, self.REQUIRED_CLAUSES["general"])
-        text_lower = json.dumps(result, ensure_ascii=False).lower()
-
-        auto_missing = []
-        for clause in required:
-            if clause.lower() not in text_lower:
-                # 检查是否在 missing_clauses 中已提及
-                already_noted = any(
-                    clause.lower() in m.lower()
-                    for m in result.get("missing_clauses", [])
-                )
-                if not already_noted:
-                    auto_missing.append(clause)
-
-        result["missing_clauses"].extend(auto_missing)
-
-        # 根据违规和缺失情况自动计算分数
-        total_checked = len(required) + len(result.get("checked_regulations", []))
-        violations = len(result.get("compliance_violations", []))
-        missing = len(result.get("missing_clauses", []))
-
-        if total_checked > 0:
-            auto_score = max(0, int(((total_checked - violations - missing) / total_checked) * 100))
-            # 取LLM分数和自动分数的较低值
-            result["score"] = min(result.get("score", auto_score), auto_score)
-
-        # 更新合规状态
-        if violations > 2 or missing > 2:
-            result["compliance_status"] = "non_compliant"
-        elif violations > 0 or missing > 0:
-            result["compliance_status"] = "partial"
-        else:
-            result["compliance_status"] = "compliant"
-
         return result
 
-    def _check_with_rules(self, text: str, contract_type: str) -> Dict[str, Any]:
-        """基于规则的合规检查（LLM失败回退）"""
-        required = self.REQUIRED_CLAUSES.get(contract_type, self.REQUIRED_CLAUSES["general"])
-
-        # 检查必备条款
-        missing_clauses = []
-        for clause in required:
-            # 使用关键词匹配
-            keywords = clause.split("/")
-            found = any(kw in text for kw in keywords)
-            if not found:
-                missing_clauses.append(clause)
-
-        # 检查常见合规问题
-        violations = []
-
-        # 检查免责条款
-        if re.search(r"免除.*一切.*责任|一切.*后果.*概不负责", text):
-            violations.append({
-                "clause": "免责条款",
-                "regulation": "《民法典》第506条",
-                "severity": "high",
-                "suggestion": "免责条款不能免除造成对方人身损害或因故意/重大过失造成财产损失的责任",
-            })
-
-        # 检查违约金
-        match = re.search(r"违约金.*?(\d+)%", text)
-        if match:
-            rate = int(match.group(1))
-            if rate > 30:
-                violations.append({
-                    "clause": f"违约金比例{rate}%",
-                    "regulation": "《民法典》第585条",
-                    "severity": "medium",
-                    "suggestion": "违约金过高，建议不超过实际损失的30%",
-                })
-
-        # 检查管辖权
-        if "仲裁" in text and "法院" in text:
-            violations.append({
-                "clause": "同时约定仲裁和诉讼",
-                "regulation": "《仲裁法》第5条",
-                "severity": "medium",
-                "suggestion": "仲裁和诉讼不能同时约定，建议选择其一",
-            })
-
-        total_checked = len(required) + 3
-        compliant_count = total_checked - len(missing_clauses) - len(violations)
-        score = max(0, int((compliant_count / total_checked) * 100))
-
-        compliance_status = "compliant"
-        if violations:
-            compliance_status = "non_compliant" if len(violations) > 2 else "partial"
-        elif missing_clauses:
-            compliance_status = "partial"
-
-        return {
-            "compliance_status": compliance_status,
-            "checked_regulations": [],
-            "missing_clauses": missing_clauses,
-            "compliance_violations": violations,
-            "score": score,
-            "summary": {
-                "total_checked": total_checked,
-                "compliant_count": compliant_count,
-                "violation_count": len(violations),
-                "missing_count": len(missing_clauses),
-                "assessment": f"基于规则检查，缺失{len(missing_clauses)}个必备条款，发现{len(violations)}个违规问题",
-            },
-        }

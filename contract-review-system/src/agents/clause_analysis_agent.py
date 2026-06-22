@@ -148,9 +148,31 @@ class ClauseAnalysisAgent(BaseAgent):
                 return self._format_result(result)
         except Exception as e:
             logger.error(f"LLM条款分析失败: {e}")
+            return {
+                "sections": {},
+                "analysis": {
+                    "completeness": {"completeness_score": 0},
+                    "ambiguous_clauses": [],
+                    "rights_obligations": {"balance_assessment": "未知"},
+                    "summary": {"total_issues": 0, "error": str(e)},
+                },
+                "missing_clauses": [],
+                "issues_found": 0,
+                "issues": [],
+            }
 
-        # 回退到正则分析
-        return self._analyze_with_regex(text)
+        return {
+            "sections": {},
+            "analysis": {
+                "completeness": {"completeness_score": 0},
+                "ambiguous_clauses": [],
+                "rights_obligations": {"balance_assessment": "未知"},
+                "summary": {"total_issues": 0},
+            },
+            "missing_clauses": [],
+            "issues_found": 0,
+            "issues": [],
+        }
 
     def _parse_json(self, content: str) -> Any:
         """容错JSON解析"""
@@ -191,35 +213,4 @@ class ClauseAnalysisAgent(BaseAgent):
             "missing_clauses": llm_result.get("completeness", {}).get("missing_clauses", []),
             "issues_found": len(llm_result.get("issues", [])),
             "issues": llm_result.get("issues", []),
-        }
-
-    def _analyze_with_regex(self, text: str) -> Dict[str, Any]:
-        """正则回退分析"""
-        # 简单的正则分析
-        ambiguous = []
-        ambiguous_patterns = [
-            (r"合理[的地]?时间", "时间表述模糊"),
-            (r"适当[的地]?方式", "方式表述模糊"),
-            (r"必要[的地]?措施", "措施表述模糊"),
-        ]
-
-        for pattern, issue_type in ambiguous_patterns:
-            for match in re.finditer(pattern, text):
-                ambiguous.append({
-                    "issue_type": issue_type,
-                    "content": match.group(0),
-                    "suggestion": "建议明确具体时间/方式/措施"
-                })
-
-        return {
-            "sections": {},
-            "analysis": {
-                "completeness": {"completeness_score": 0},
-                "ambiguous_clauses": ambiguous,
-                "rights_obligations": {"balance_assessment": "未知"},
-                "summary": {"total_issues": len(ambiguous)},
-            },
-            "missing_clauses": [],
-            "issues_found": len(ambiguous),
-            "issues": ambiguous,
         }
