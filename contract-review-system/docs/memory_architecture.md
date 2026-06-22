@@ -54,11 +54,10 @@ ConversationContext
     "contract_text": "合同原文...",           # 合同文本
     "contract_filename": "劳动合同.txt",      # 文件名
     "parsed_result": {...},                   # Agent间传递（document_parser → risk_assessor）
-    "risk_result": {...},                     # Agent间传递（risk_assessor → clause_analyst）
 }
 ```
 
-**不存** Agent 最终执行结果（`result_*` 已移除），Agent 结果存在 `_turns[*].agent_results` 中。
+**不存** Agent 最终执行结果，Agent 结果存在 `_turns[*].agent_results` 中。
 
 ### 数据流
 
@@ -107,6 +106,8 @@ LLM 收到的 prompt：
 
 用户问题：第二条建议什么意思？
 ```
+
+追问不需要读取 `_turns` 中的 Agent 原始结果，因为 `_messages` 中助手的回复已经包含了格式化的分析结果。
 
 ### 生命周期
 
@@ -261,18 +262,24 @@ Agent 间共享记忆，支持：
 │  │                                                │   │
 │  │  _messages: [用户消息, 助手回复, ...]           │   │
 │  │  _turns: [                                       │   │
-│  │    TurnContext(intent, agent_results={...}),     │   │
-│  │    TurnContext(intent, agent_results={...}),     │   │
+│  │    TurnContext(                                  │   │
+│  │      intent="risk_assessment",                   │   │
+│  │      agent_results={"risk_assessor": {...}}      │   │
+│  │    ),                                            │   │
 │  │  ]                                               │   │
 │  │  _shared_data: {                                 │   │
 │  │    "contract_text": "...",                       │   │
+│  │    "contract_filename": "...",                   │   │
 │  │    "parsed_result": {...},  ← Agent间传递        │   │
 │  │  }                                               │   │
 │  │  _intent_chain: ["risk_assessment", ...]         │   │
 │  └────────────────────────────────────────────────┘   │
 │                                                       │
+│  Agent执行结果 → 写入 _turns[*].agent_results          │
+│  Agent间中间数据 → 写入 _shared_data                   │
+│                                                       │
 │  追问时：                                              │
-│    context = 合同内容(_shared_data)                     │
+│    context = 合同内容(_shared_data["contract_text"])    │
 │            + 对话历史(_messages)                        │
 │    → 发给 LLM 生成回答                                 │
 └─────────────────────────────────────────────────────┘
