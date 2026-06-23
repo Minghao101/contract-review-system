@@ -1,92 +1,52 @@
 """
-多轮对话处理器 - 管理完整的多轮对话流程
+多轮对话处理器 - 弱中心化调度器（启动协调者）
 
-功能：
-- 对话历史存储和检索
-- 上下文注入（历史对话 + 上传文件 + Agent结果）
-- 意图路由到对应Agent（直接执行）
-- 问候和未知意图直接处理（不需要Agent）
-- 追问场景支持（解析→风险→修改建议→报告）
-- 对话状态管理
+阶段1改造后职责：
+- 意图识别（不变）
+- 初始化共享内存 + 消息总线
+- 发布 task.created 事件启动事件链
+- 等待 task.completed 事件返回结果（asyncio.Event + 全局超时）
+- 聚合栅栏：共享内存计数器，所有分析完成后自动触发报告生成
+- 问候/追问/未知意图直接处理（不变）
+- 异常兜底：超时熔断、Agent 失败降级
 """
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
 from .base_agent import BaseAgent
 from .intent_recognizer import IntentRecognizer, IntentType, Intent
 from .conversation_context import ConversationContext, ConversationManager, ConversationState
+from .communication import AgentMessage, MessageType, MessageBus
+from .business_events import BusinessEvent
+from src.memory.shared_memory import SharedMemoryManager
+from src.memory.memory_layer import MemoryLayer
 from src.utils.llm_factory import get_llm
 
 logger = logging.getLogger(__name__)
 
+# 全局超时：每个任务最大执行时长（秒）
+_TASK_TIMEOUT = 180
 
-# ==================== 意图到Agent的路由映射 ====================
-
-INTENT_AGENT_ROUTING: Dict[IntentType, Dict[str, Any]] = {
-    IntentType.CONTRACT_REVIEW: {
-        "agents": ["document_parser", "clause_analyst", "risk_assessor", "compliance_checker"],
-        "description": "完整合同审查（并行执行多个Agent）",
-        "requires_contract": True,
-        "parallel": True,
-    },
-    IntentType.CLAUSE_ANALYSIS: {
-        "agents": ["clause_analyst"],
-        "description": "条款分析",
-        "requires_contract": True,
-        "parallel": False,
-    },
-    IntentType.RISK_ASSESSMENT: {
-        "agents": ["risk_assessor"],
-        "description": "风险评估",
-        "requires_contract": True,
-        "parallel": False,
-    },
-    IntentType.COMPLIANCE_CHECK: {
-        "agents": ["compliance_checker"],
-        "description": "合规检查",
-        "requires_contract": True,
-        "parallel": False,
-    },
-    IntentType.REPORT_GENERATION: {
-        "agents": ["report_generator"],
-        "description": "报告生成",
-        "requires_contract": False,
-        "parallel": False,
-    },
-    IntentType.QUESTION_ANSWER: {
-        "agents": [],
-        "description": "问题回答（基于上下文直接回答）",
-        "requires_contract": False,
-        "parallel": False,
-        "direct_response": True,
-    },
-    # 问候和未知意图不需要Agent，直接在handler中处理
-    IntentType.GREETING: {
-        "agents": [],
-        "description": "问候",
-        "requires_contract": False,
-        "parallel": False,
-        "direct_response": True,
-    },
-    IntentType.UNKNOWN: {
-        "agents": [],
-        "description": "未知意图",
-        "requires_contract": False,
-        "parallel": False,
-        "direct_response": True,
-    },
+# 意图到所需 Agent 的映射
+INTENT_REQUIRED_AGENTS = {
+    IntentType.CONTRACT_REVIEW: ["document_parser", "risk_assessor", "clause_analyst", "compliance_checker", "report_generator"],
+    IntentType.RISK_ASSESSMENT: ["risk_assessor"],
+    IntentType.CLAUSE_ANALYSIS: ["clause_analyst"],
+    IntentType.COMPLIANCE_CHECK: ["compliance_checker"],
+    IntentType.REPORT_GENERATION: ["report_generator"],
 }
 
 
 class MultiTurnHandler:
     """
-    多轮对话处理器
+    多轮对话处理器（弱中心化 — 启动协调者）
 
-    直接管理Agent执行，不经过CoordinatorAgent：
-    - 消息接收和意图识别
-    - 上下文构建和注入
-    - 直接路由到对应Agent执行
-    - 结果存储和回复生成
+    核心职责：
+    1. 意图识别
+    2. 初始化共享内存和消息总线
+    3. 启动事件驱动的 Agent 协作链
+    4. 等待最终结果并返回（asyncio.Event + 超时熔断）
     """
 
     def __init__(
@@ -94,26 +54,20 @@ class MultiTurnHandler:
         intent_recognizer: Optional[IntentRecognizer] = None,
         conversation_manager: Optional[ConversationManager] = None,
     ):
-        """
-        初始化多轮对话处理器
-
-        Args:
-            intent_recognizer: 意图识别器（不提供则使用默认实例）
-            conversation_manager: 对话管理器（不提供则使用默认实例）
-        """
         self.intent_recognizer = intent_recognizer or IntentRecognizer()
         self.conversation_manager = conversation_manager or ConversationManager()
         self._agents: Dict[str, BaseAgent] = {}
 
-        logger.info("多轮对话处理器初始化")
+        # 阶段1：事件驱动基础设施
+        self._shared_memory: Optional[SharedMemoryManager] = None
+        self._message_bus: Optional[MessageBus] = None
+        self._completion_event: Optional[asyncio.Event] = None
+        self._analysis_complete_event: Optional[asyncio.Event] = None
+
+        logger.info("多轮对话处理器初始化（弱中心化模式）")
 
     def register_agent(self, agent: BaseAgent):
-        """
-        注册Agent实例
-
-        Args:
-            agent: Agent实例
-        """
+        """注册Agent实例"""
         self._agents[agent.agent_id] = agent
         logger.info(f"注册Agent: {agent.name} ({agent.agent_id})")
 
@@ -132,14 +86,7 @@ class MultiTurnHandler:
         """
         处理用户消息（多轮对话核心方法）
 
-        Args:
-            session_id: 会话ID
-            user_message: 用户消息文本
-            contract_text: 合同文本（可选，上传文件时提供）
-            file_info: 文件信息（可选，包含filename、type等）
-
-        Returns:
-            处理结果字典，包含intent、agent、result、response等
+        对外接口不变，内部改为事件驱动。
         """
         # 1. 获取或创建会话上下文
         ctx = self.conversation_manager.get_or_create(session_id)
@@ -163,7 +110,7 @@ class MultiTurnHandler:
 
         logger.info(f"意图识别: {intent.type.value} (confidence={intent.confidence:.2f})")
 
-        # 5. 构建Agent任务上下文
+        # 5. 构建任务上下文（用于追问等直接回复场景）
         task_context = ctx.build_task_context()
         task_context["intent"] = intent.to_dict()
         task_context["user_message"] = user_message
@@ -171,12 +118,8 @@ class MultiTurnHandler:
         # 6. 注入追问上下文
         task_context = self._inject_follow_up_context(task_context, intent, ctx)
 
-        # 7. 路由到对应的Agent（直接执行）
-        routing_info = self._get_routing(intent.type)
-        agent_names = routing_info["agents"]
-
-        # 8. 处理问候、未知意图和问题回答（不需要Agent）
-        if routing_info.get("direct_response"):
+        # 7. 处理问候、未知意图和问题回答（不需要Agent）
+        if intent.type in (IntentType.GREETING, IntentType.QUESTION_ANSWER, IntentType.UNKNOWN):
             if intent.type == IntentType.QUESTION_ANSWER:
                 response = await self._answer_from_context(user_message, ctx)
             else:
@@ -191,54 +134,284 @@ class MultiTurnHandler:
                 "context_summary": self._get_context_summary(ctx),
             }
 
-        # 9. 检查是否需要合同文本
-        if routing_info.get("requires_contract") and not task_context.get("contract_text"):
+        # 8. 需要 Agent 执行的意图 → 事件驱动模式
+        # 检查是否需要合同文本
+        requires_contract = intent.type in (
+            IntentType.CONTRACT_REVIEW, IntentType.RISK_ASSESSMENT,
+            IntentType.CLAUSE_ANALYSIS, IntentType.COMPLIANCE_CHECK,
+        )
+        if requires_contract and not contract_text and not ctx.get_contract_text():
             response = "请先上传或提供合同文本，然后我再帮您进行分析。"
             ctx.add_assistant_message(response)
             return {
                 "session_id": session_id,
                 "intent": intent.to_dict(),
-                "agents": agent_names,
+                "agents": [],
                 "result": None,
                 "response": response,
                 "needs_contract": True,
             }
 
-        # 10. 执行Agent（直接调用Agent.process()）
-        result = await self._execute_agents(agent_names, task_context, routing_info.get("parallel", False))
+        # 9. 初始化事件驱动基础设施
+        effective_contract = contract_text or ctx.get_contract_text() or ""
+        self._init_infrastructure(session_id, effective_contract, intent, file_info)
 
-        # 11. 存储结果到上下文
-        for agent_name in agent_names:
-            if agent_name in result:
-                ctx.set_agent_result(agent_name, result[agent_name])
+        # 10. 绑定基础设施到所有 Agent（传入聚合屏障回调）
+        for agent in self._agents.values():
+            agent.bind_infrastructure(
+                self._shared_memory,
+                self._message_bus,
+                on_all_complete=self._on_all_analyses_complete,
+            )
 
-        # 12. 生成回复
-        response = self._format_response(intent.type, result, ctx)
+        # 11. 执行事件驱动的 Agent 协作链
+        result = await self._execute_event_driven(intent.type, session_id)
+
+        # 12. 从共享内存收集结果，存入上下文
+        all_results = self._collect_results()
+        for agent_name, agent_result in all_results.items():
+            ctx.set_agent_result(agent_name, agent_result)
+
+        # 13. 生成回复
+        response = self._format_response(intent.type, all_results, ctx)
         ctx.add_assistant_message(response)
 
         return {
             "session_id": session_id,
             "intent": intent.to_dict(),
-            "agents": agent_names,
+            "agents": list(all_results.keys()),
             "result": result,
             "response": response,
             "context_summary": self._get_context_summary(ctx),
         }
 
-    def _get_routing(self, intent_type: IntentType) -> Dict[str, Any]:
-        """获取意图对应的路由信息"""
-        return INTENT_AGENT_ROUTING.get(intent_type, INTENT_AGENT_ROUTING[IntentType.UNKNOWN])
+    # ==================== 事件驱动执行 ====================
+
+    def _on_all_analyses_complete(self):
+        """聚合屏障回调：所有分析 Agent 完成后由最后一个 Agent 调用"""
+        logger.info("聚合屏障归零：所有分析 Agent 已完成")
+        if self._analysis_complete_event:
+            self._analysis_complete_event.set()
+
+    def _init_infrastructure(
+        self,
+        session_id: str,
+        contract_text: str,
+        intent: Intent,
+        file_info: Optional[Dict[str, Any]] = None,
+    ):
+        """初始化共享内存和消息总线，写入 CONTEXT 层原始数据"""
+        # 创建本次会话的共享内存
+        self._shared_memory = SharedMemoryManager(contract_id=session_id)
+        self._message_bus = MessageBus()
+        self._completion_event = asyncio.Event()
+        self._analysis_complete_event = asyncio.Event()
+
+        # 写入 CONTEXT 层（原始输入，写入一次后只读）
+        contract_type = "general"
+        if file_info:
+            contract_type = file_info.get("contract_type", "general")
+
+        self._shared_memory.write("coordinator", "contract_text", contract_text, MemoryLayer.CONTEXT)
+        self._shared_memory.write("coordinator", "contract_type", contract_type, MemoryLayer.CONTEXT)
+        self._shared_memory.write("coordinator", "intent_type", intent.type.value, MemoryLayer.CONTEXT)
+        self._shared_memory.write("coordinator", "session_id", session_id, MemoryLayer.CONTEXT)
+
+        # 聚合栅栏：待完成分析 Agent 计数器
+        required = INTENT_REQUIRED_AGENTS.get(intent.type, [])
+        analysis_agents = [a for a in ["risk_assessor", "clause_analyst", "compliance_checker"] if a in required]
+        self._shared_memory.write(
+            "coordinator", "_pending_count", len(analysis_agents), MemoryLayer.CONTEXT,
+            validate=False,  # 内部字段，跳过 Schema 校验
+        )
+        self._shared_memory.write(
+            "coordinator", "_required_agents", required, MemoryLayer.CONTEXT,
+            validate=False,
+        )
+
+        logger.info(
+            f"共享内存初始化完成: session={session_id}, "
+            f"pending_analyses={len(analysis_agents)}, required={required}"
+        )
+
+    async def _execute_event_driven(self, intent_type: IntentType, session_id: str) -> Dict[str, Any]:
+        """
+        执行事件驱动的 Agent 协作链（带全局超时熔断）
+
+        根据意图类型选择不同的执行路径：
+        - CONTRACT_REVIEW: 完整链路（聚合栅栏驱动）
+        - 单 Agent 意图: 按需执行
+        """
+        task = {"session_id": session_id}
+
+        try:
+            result = await asyncio.wait_for(
+                self._execute_by_intent(intent_type, task),
+                timeout=_TASK_TIMEOUT,
+            )
+            return result
+
+        except asyncio.TimeoutError:
+            logger.error(f"任务执行超时（{_TASK_TIMEOUT}s），熔断终止")
+            return {"error": f"执行超时（{_TASK_TIMEOUT}秒）", "status": "timeout"}
+        except Exception as e:
+            logger.error(f"事件驱动执行失败: {e}", exc_info=True)
+            return {"error": str(e), "status": "error"}
+
+    async def _execute_by_intent(self, intent_type: IntentType, task: Dict[str, Any]) -> Dict[str, Any]:
+        """根据意图类型分发执行"""
+        if intent_type == IntentType.CONTRACT_REVIEW:
+            return await self._execute_full_review_chain(task)
+
+        elif intent_type in (IntentType.RISK_ASSESSMENT, IntentType.CLAUSE_ANALYSIS,
+                             IntentType.COMPLIANCE_CHECK, IntentType.REPORT_GENERATION):
+            agent_map = {
+                IntentType.RISK_ASSESSMENT: "risk_assessor",
+                IntentType.CLAUSE_ANALYSIS: "clause_analyst",
+                IntentType.COMPLIANCE_CHECK: "compliance_checker",
+                IntentType.REPORT_GENERATION: "report_generator",
+            }
+            agent_name = agent_map[intent_type]
+            result = await self._execute_single_agent(agent_name, task)
+            # 单 Agent 场景：设置所有事件（分析完成 + 任务完成）
+            self._analysis_complete_event.set()
+            self._completion_event.set()
+            return result
+
+        else:
+            logger.warning(f"未知意图类型: {intent_type}")
+            return {}
+
+    async def _execute_full_review_chain(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        完整审查链路（聚合栅栏驱动）
+
+        链路：
+        1. DocumentParser 执行 → 发布 document.parsed
+        2. Risk + Clause + Compliance 并行执行（按需，只执行 required_agents 中的）
+        3. 聚合栅栏：每个分析 Agent 完成后计数器 -1，归零时触发 ReportGenerator
+        4. 等待 task.completed 事件
+        """
+        required = self._shared_memory.read("coordinator", "_required_agents", MemoryLayer.CONTEXT) or []
+
+        # Step 1: 文档解析（如果在 required 列表中）
+        if "document_parser" in required:
+            logger.info("Step 1: 文档解析")
+            parse_result = await self._execute_single_agent("document_parser", task)
+            if isinstance(parse_result, dict) and "error" in parse_result:
+                logger.warning(f"文档解析失败，跳过后续步骤: {parse_result}")
+                self._completion_event.set()
+                return parse_result
+
+        # Step 2: 按需并行执行分析 Agent（只执行 required 列表中的）
+        # Agent 完成后会递减 _pending_count，归零时设置 _analysis_complete_event
+        analysis_tasks = []
+        analysis_names = []
+        for agent_name in ["risk_assessor", "clause_analyst", "compliance_checker"]:
+            if agent_name in required:
+                analysis_tasks.append(self._execute_single_agent(agent_name, task))
+                analysis_names.append(agent_name)
+
+        if analysis_tasks:
+            logger.info(f"Step 2: 并行执行 {analysis_names}（等待聚合屏障归零）")
+
+            # 启动所有分析 Agent，但不等待完成
+            # Agent 完成后会通过 decrement_pending_count() 递减计数器
+            gather_task = asyncio.create_task(
+                asyncio.gather(*analysis_tasks, return_exceptions=True)
+            )
+
+            # 等待聚合屏障归零（所有分析 Agent 完成）
+            try:
+                await asyncio.wait_for(
+                    self._analysis_complete_event.wait(),
+                    timeout=_TASK_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"聚合屏障等待超时（{_TASK_TIMEOUT}s）")
+                gather_task.cancel()
+
+            # 处理异常（降级）
+            if gather_task.done() and not gather_task.cancelled():
+                analysis_results = gather_task.result()
+                for agent_name, result in zip(analysis_names, analysis_results):
+                    if isinstance(result, Exception):
+                        logger.error(f"Agent {agent_name} 执行异常: {result}，标记为失败")
+                        self._shared_memory.write(
+                            "coordinator", f"{agent_name}_status", "failed", MemoryLayer.ANALYSIS,
+                            validate=False,
+                        )
+
+        # Step 3: ReportGenerator 已被最后一个分析 Agent 自动触发
+        # 等待 ReportGenerator 完成（通过 _completion_event）
+        if "report_generator" in required:
+            logger.info("Step 3: 等待 ReportGenerator 完成")
+            try:
+                await asyncio.wait_for(
+                    self._completion_event.wait(),
+                    timeout=_TASK_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"ReportGenerator 等待超时（{_TASK_TIMEOUT}s）")
+
+        # 汇总所有结果
+        all_results = self._collect_results()
+        if "document_parser" in required:
+            all_results["document_parser"] = parse_result
+
+        return all_results
+
+    async def _execute_single_agent(self, agent_name: str, task: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        执行单个 Agent（全链路容错）
+
+        容错设计：
+        - 无论成功失败，都必须完成状态重置
+        - Agent 异常不向上抛出，降级为错误结果
+        """
+        if agent_name not in self._agents:
+            logger.warning(f"Agent 未注册: {agent_name}")
+            return {"status": "skipped", "reason": "agent_not_registered"}
+
+        agent = self._agents[agent_name]
+        try:
+            agent.set_running(True)
+            logger.info(f"开始执行 Agent: {agent_name}")
+            result = await agent.process(task)
+            logger.info(f"Agent 执行完成: {agent_name}")
+            return result
+        except Exception as e:
+            logger.error(f"Agent 执行失败: {agent_name} - {e}", exc_info=True)
+            # 降级：返回错误结果，不中断链路
+            return {"status": "error", "agent": agent_name, "error": str(e)}
+        finally:
+            agent.set_running(False)
+
+    def _collect_results(self) -> Dict[str, Any]:
+        """从共享内存收集所有 ANALYSIS 层结果"""
+        if self._shared_memory is None:
+            return {}
+
+        results = {}
+        analysis_keys = self._shared_memory.get_all_keys(MemoryLayer.ANALYSIS)
+        for key in analysis_keys:
+            value = self._shared_memory.read("collector", key, MemoryLayer.ANALYSIS)
+            if value is not None:
+                results[key] = value
+
+        # 也收集 DECISION 层
+        decision_keys = self._shared_memory.get_all_keys(MemoryLayer.DECISION)
+        for key in decision_keys:
+            value = self._shared_memory.read("collector", key, MemoryLayer.DECISION)
+            if value is not None:
+                results[key] = value
+
+        return results
+
+    # ==================== 保留方法（不变） ====================
 
     def _get_direct_response(self, intent_type: IntentType) -> str:
-        """
-        获取问候和未知意图的直接回复
-
-        Args:
-            intent_type: 意图类型
-
-        Returns:
-            回复文本
-        """
+        """获取问候和未知意图的直接回复"""
         if intent_type == IntentType.GREETING:
             return (
                 "您好！我是智能合同审查助手，可以帮您：\n\n"
@@ -249,8 +422,6 @@ class MultiTurnHandler:
                 "- 生成报告\n\n"
                 "请上传或粘贴合同文本，告诉我您需要什么帮助。"
             )
-
-        # 未知意图
         return (
             "抱歉，我不太理解您的意思。您可以：\n\n"
             "- 上传合同文本进行审查\n"
@@ -259,28 +430,16 @@ class MultiTurnHandler:
         )
 
     async def _answer_from_context(self, user_message: str, ctx: ConversationContext) -> str:
-        """
-        基于上下文回答用户问题（使用LLM理解对话历史）
-
-        Args:
-            user_message: 用户问题
-            ctx: 对话上下文
-
-        Returns:
-            回复文本
-        """
+        """基于上下文回答用户问题（使用LLM理解对话历史）"""
         logger.info(f"追问处理: message={user_message[:50]}, session={ctx.session_id}")
 
-        # 如果没有任何对话历史，提示用户
         messages = ctx.get_messages()
         logger.info(f"上下文消息数: {len(messages)}")
         if not messages:
             return "目前还没有进行过对话。请先上传合同文件，然后我可以帮你分析。"
 
-        # 构建上下文：合同内容 + 对话历史
         context_parts = []
 
-        # 1. 合同内容
         contract_text = ctx.get_contract_text()
         if contract_text:
             context_parts.append(f"=== 合同内容 ===\n{contract_text[:3000]}")
@@ -288,7 +447,6 @@ class MultiTurnHandler:
         else:
             logger.warning("未找到合同内容")
 
-        # 2. 对话历史
         context_parts.append("\n=== 对话历史 ===")
         for msg in messages:
             role = "用户" if msg["role"] == "user" else "助手"
@@ -296,12 +454,11 @@ class MultiTurnHandler:
 
         context_str = "\n".join(context_parts)
 
-        # 调用LLM回答
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
 
             llm = get_llm()
-            messages = [
+            llm_messages = [
                 SystemMessage(content="""你是一个合同审查助手。用户之前已经对合同进行了分析，现在在追问细节。
 
 规则：
@@ -314,9 +471,8 @@ class MultiTurnHandler:
 用户问题：{user_message}""")
             ]
 
-            response = await llm.ainvoke(messages)
+            response = await llm.ainvoke(llm_messages)
             content = response.content
-            # LLM可能返回content blocks列表（如thinking + text），提取文本部分
             if isinstance(content, list):
                 text_parts = [block.get("text", "") for block in content
                               if isinstance(block, dict) and block.get("type") == "text"]
@@ -326,7 +482,7 @@ class MultiTurnHandler:
 
         except Exception as e:
             logger.error(f"LLM回答失败: {e}", exc_info=True)
-            return f"抱歉，回答问题时出现错误。您可以尝试重新提问。"
+            return "抱歉，回答问题时出现错误。您可以尝试重新提问。"
 
     def _inject_follow_up_context(
         self,
@@ -334,174 +490,24 @@ class MultiTurnHandler:
         intent: Intent,
         ctx: ConversationContext,
     ) -> Dict[str, Any]:
-        """
-        注入追问上下文
-
-        根据当前意图和历史Agent结果，自动注入相关上下文。
-        """
+        """注入追问上下文"""
         all_results = ctx.get_all_results()
 
         if not all_results:
             return task_context
 
-        # 风险评估追问：注入解析结果
         if intent.type == IntentType.RISK_ASSESSMENT:
             if "document_parser" in all_results:
                 task_context["parsed_result"] = all_results["document_parser"]
-                logger.debug("注入解析结果到风险评估上下文")
 
-        # 条款分析追问：注入风险结果
         if intent.type == IntentType.CLAUSE_ANALYSIS:
             if "risk_assessor" in all_results:
                 task_context["risk_result"] = all_results["risk_assessor"]
-                logger.debug("注入风险结果到条款分析上下文")
 
-        # 报告生成：注入所有结果
         if intent.type == IntentType.REPORT_GENERATION:
             task_context["all_previous_results"] = all_results
-            logger.debug("注入所有分析结果到报告生成上下文")
 
         return task_context
-
-    async def _execute_agents(
-        self,
-        agent_names: List[str],
-        task_context: Dict[str, Any],
-        parallel: bool = False
-    ) -> Dict[str, Any]:
-        """
-        执行Agent（直接调用Agent.process()）
-
-        Args:
-            agent_names: 要执行的Agent名称列表
-            task_context: 任务上下文
-            parallel: 是否并行执行
-
-        Returns:
-            执行结果字典 {agent_name: result}
-        """
-        results = {}
-
-        # 过滤出已注册的Agent
-        agents_to_run = []
-        for agent_name in agent_names:
-            if agent_name in self._agents:
-                agents_to_run.append((agent_name, self._agents[agent_name]))
-            else:
-                logger.warning(f"Agent未注册: {agent_name}")
-                results[agent_name] = {
-                    "status": "skipped",
-                    "reason": "agent_not_registered"
-                }
-
-        if not agents_to_run:
-            return results
-
-        # 执行Agent
-        if parallel and len(agents_to_run) > 1:
-            # 并行执行
-            import asyncio
-            async_tasks = []
-            for agent_name, agent in agents_to_run:
-                async_tasks.append(self._execute_single_agent(agent_name, agent, task_context))
-
-            task_results = await asyncio.gather(*async_tasks, return_exceptions=True)
-
-            for (agent_name, _), result in zip(agents_to_run, task_results):
-                if isinstance(result, Exception):
-                    results[agent_name] = {
-                        "status": "error",
-                        "error": str(result)
-                    }
-                else:
-                    results[agent_name] = result
-        else:
-            # 串行执行
-            for agent_name, agent in agents_to_run:
-                result = await self._execute_single_agent(agent_name, agent, task_context)
-                results[agent_name] = result
-
-        return results
-
-    async def _execute_single_agent(
-        self,
-        agent_name: str,
-        agent: BaseAgent,
-        task_context: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        执行单个Agent
-
-        Args:
-            agent_name: Agent名称
-            agent: Agent实例
-            task_context: 任务上下文
-
-        Returns:
-            执行结果
-        """
-        try:
-            # 准备Agent输入
-            task_input = self._prepare_agent_input(agent_name, task_context)
-
-            # 直接调用agent.process()
-            logger.info(f"开始执行Agent: {agent_name}")
-            result = await agent.process(task_input)
-            logger.info(f"Agent执行完成: {agent_name}")
-
-            return {
-                "status": "completed",
-                "agent": agent_name,
-                "result": result
-            }
-        except Exception as e:
-            logger.error(f"Agent执行失败: {agent_name} - {e}")
-            return {
-                "status": "error",
-                "agent": agent_name,
-                "error": str(e)
-            }
-
-    def _prepare_agent_input(
-        self,
-        agent_name: str,
-        task_context: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        准备Agent输入参数
-
-        根据不同Agent类型，从task_context中提取所需参数
-        """
-        contract_text = task_context.get("contract_text", "")
-        contract_type = task_context.get("contract_type", "general")
-
-        # 根据Agent类型准备不同的输入
-        agent_inputs = {
-            "document_parser": {
-                "contract_text": contract_text,
-                "contract_type": contract_type,
-            },
-            "clause_analyst": {
-                "contract_text": contract_text,
-                "review_focus": task_context.get("review_focus", []),
-            },
-            "risk_assessor": {
-                "contract_text": contract_text,
-                "contract_type": contract_type,
-            },
-            "compliance_checker": {
-                "contract_text": contract_text,
-                "contract_type": contract_type,
-            },
-            "report_generator": {
-                "previous_results": task_context.get("all_previous_results", {}),
-            },
-        }
-
-        return agent_inputs.get(agent_name, {
-            "contract_text": contract_text,
-            "contract_type": contract_type,
-        })
 
     def _format_response(
         self,
@@ -509,42 +515,26 @@ class MultiTurnHandler:
         results: Dict[str, Any],
         ctx: ConversationContext,
     ) -> str:
-        """
-        根据意图类型和Agent结果生成用户友好的回复
-
-        Args:
-            intent_type: 意图类型
-            results: Agent执行结果字典 {agent_name: result}
-            ctx: 对话上下文
-
-        Returns:
-            格式化的回复文本
-        """
+        """根据意图类型和Agent结果生成用户友好的回复"""
         if not results:
             return "抱歉，处理过程中出现了问题。"
 
-        # 完整合同审查
         if intent_type == IntentType.CONTRACT_REVIEW:
-            completed_agents = [name for name, r in results.items() if r.get("status") == "completed"]
-            failed_agents = [name for name, r in results.items() if r.get("status") == "error"]
+            completed = [name for name, r in results.items()
+                        if isinstance(r, dict) and r.get("status") != "error"]
+            failed = [name for name, r in results.items()
+                     if isinstance(r, dict) and r.get("status") == "error"]
 
             response = f"📋 合同审查完成\n\n"
-            response += f"已完成: {len(completed_agents)} 个分析\n"
-
-            if failed_agents:
-                response += f"失败: {', '.join(failed_agents)}\n"
-
-            response += "\n如需进一步分析，请告诉我具体需求，例如：\n"
-            response += "- 评估风险\n"
-            response += "- 分析条款\n"
-            response += "- 检查合规性\n"
-            response += "- 生成报告"
+            response += f"已完成: {len(completed)} 个分析\n"
+            if failed:
+                response += f"失败: {', '.join(failed)}\n"
+            response += "\n如需进一步分析，请告诉我具体需求。"
             return response
 
-        # 风险评估
         if intent_type == IntentType.RISK_ASSESSMENT:
-            if "risk_assessor" in results and results["risk_assessor"].get("status") == "completed":
-                risk_result = results["risk_assessor"].get("result", {})
+            risk_result = results.get("risk_assessor", {})
+            if isinstance(risk_result, dict) and "risk_level" in risk_result:
                 risk_level = risk_result.get("risk_level", "unknown")
                 risks = risk_result.get("risks", [])
                 level_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(risk_level, "⚪")
@@ -556,47 +546,32 @@ class MultiTurnHandler:
                 response += "\n如需详细分析某个风险点，请告诉我。"
                 return response
 
-        # 条款分析
         if intent_type == IntentType.CLAUSE_ANALYSIS:
-            if "clause_analyst" in results and results["clause_analyst"].get("status") == "completed":
-                clause_result = results["clause_analyst"].get("result", {})
+            clause_result = results.get("clause_analyst", {})
+            if isinstance(clause_result, dict):
                 issues = clause_result.get("issues_found", 0)
-                response = f"📋 条款分析完成\n\n"
-                response += f"发现问题: {issues} 个\n\n"
-                return response
+                return f"📋 条款分析完成\n\n发现问题: {issues} 个\n\n如需详细分析，请告诉我。"
 
-        # 合规检查
         if intent_type == IntentType.COMPLIANCE_CHECK:
-            if "compliance_checker" in results and results["compliance_checker"].get("status") == "completed":
-                compliance_result = results["compliance_checker"].get("result", {})
+            compliance_result = results.get("compliance_checker", {})
+            if isinstance(compliance_result, dict):
                 score = compliance_result.get("score", 0)
                 violations = compliance_result.get("compliance_violations", [])
-                response = f"✅ 合规检查完成\n\n"
-                response += f"合规评分: {score}/100\n\n"
+                response = f"✅ 合规检查完成\n\n合规评分: {score}/100\n\n"
                 if violations:
                     response += "需要改进:\n"
-                    for violation in violations:
-                        response += f"- ⚠️ {violation.get('suggestion', '无')}\n"
+                    for v in violations:
+                        response += f"- ⚠️ {v.get('suggestion', '无')}\n"
                 else:
                     response += "未发现合规问题。\n"
                 return response
 
-        # 报告生成
         if intent_type == IntentType.REPORT_GENERATION:
-            if "report_generator" in results and results["report_generator"].get("status") == "completed":
-                report_result = results["report_generator"].get("result", {})
+            report_result = results.get("report_generator", {})
+            if isinstance(report_result, dict):
                 report = report_result.get("report", {})
-                response = f"📊 审查报告已生成\n\n"
-                response += f"报告标题: {report.get('title', '合同审查报告')}\n"
-                response += f"生成时间: {report_result.get('generated_at', '未知')}\n"
-                return response
+                return f"📊 审查报告已生成\n\n报告标题: {report.get('title', '合同审查报告')}\n"
 
-        # 问题回答
-        if intent_type == IntentType.QUESTION_ANSWER:
-            if "question_answerer" in results and results["question_answerer"].get("status") == "completed":
-                return results["question_answerer"].get("result", {}).get("answer", "让我为您解答这个问题。")
-
-        # 默认回复
         return f"已处理您的请求（意图: {intent_type.value}）。如需其他帮助，请告诉我。"
 
     def _get_context_summary(self, ctx: ConversationContext) -> Dict[str, Any]:
@@ -639,13 +614,13 @@ class MultiTurnHandler:
         return True
 
     def get_supported_intents(self) -> List[Dict[str, Any]]:
-        """获取支持的意图和路由信息"""
-        result = []
-        for intent_type, routing in INTENT_AGENT_ROUTING.items():
-            result.append({
-                "intent": intent_type.value,
-                "agent": routing["agent"],
-                "description": routing["description"],
-                "requires_contract": routing["requires_contract"],
-            })
-        return result
+        """获取支持的意图信息"""
+        return [
+            {"intent": "contract_review", "description": "完整合同审查", "requires_contract": True},
+            {"intent": "risk_assessment", "description": "风险评估", "requires_contract": True},
+            {"intent": "clause_analysis", "description": "条款分析", "requires_contract": True},
+            {"intent": "compliance_check", "description": "合规检查", "requires_contract": True},
+            {"intent": "report_generation", "description": "报告生成", "requires_contract": False},
+            {"intent": "question_answer", "description": "问题回答", "requires_contract": False},
+            {"intent": "greeting", "description": "问候", "requires_contract": False},
+        ]

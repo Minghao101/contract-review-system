@@ -9,6 +9,8 @@ import logging
 from src.utils.llm_response import parse_json_from_llm
 
 from .base_agent import BaseAgent
+from .business_events import BusinessEvent
+from src.memory.memory_layer import MemoryLayer
 
 logger = logging.getLogger(__name__)
 
@@ -45,35 +47,66 @@ class RiskAssessmentAgent(BaseAgent):
         """
         处理风险评估任务
 
+        数据来源（优先级）：
+        1. 共享内存（事件驱动模式）
+        2. task 参数（兼容旧模式）
+
         Args:
-            task: 任务数据
-                - contract_text: 合同文本
-                - contract_type: 合同类型 (可选)
+            task: 任务数据（兼容旧模式）
 
         Returns:
             风险评估结果
         """
-        contract_text = task.get("contract_text", "")
-        contract_type = task.get("contract_type", "general")
+        # 优先从共享内存读取（事件驱动模式）
+        contract_text = self.read_shared("contract_text", MemoryLayer.CONTEXT) or ""
+        contract_type = self.read_shared("contract_type", MemoryLayer.CONTEXT) or "general"
+
+        # 兼容旧模式：从 task 参数读取
+        if not contract_text:
+            contract_text = task.get("contract_text", "")
+        if contract_type == "general":
+            contract_type = task.get("contract_type", "general")
 
         if not contract_text:
             return {"error": "合同文本为空"}
 
-        logger.info(f"开始风险评估，文本长度: {len(contract_text)}")
+        # 更新状态
+        self.set_running(True)
+        self.update_activity()
 
-        # LLM风险评估
-        result = await self._assess_with_llm(contract_text, contract_type)
+        try:
+            logger.info(f"开始风险评估，文本长度: {len(contract_text)}")
 
-        if "error" in result:
+            # LLM风险评估
+            result = await self._assess_with_llm(contract_text, contract_type)
+
+            if "error" in result:
+                return result
+
+            # 风险量化
+            risks = result.get("risks", [])
+            result["risk_quantification"] = self.quantify_risk(risks)
+            result["mitigation_plan"] = self.suggest_mitigation(risks)
+
+            logger.info(f"风险评估完成，风险等级: {result.get('risk_level', 'unknown')}")
+
+            # 阶段1：写入共享内存 + 发布事件
+            self.write_shared("risk_result", result, MemoryLayer.ANALYSIS)
+            self.publish_event(BusinessEvent.RISK_ANALYZED, {"session_id": task.get("session_id")})
+            logger.info(f"已发布事件: {BusinessEvent.RISK_ANALYZED}")
+
             return result
-
-        # 风险量化
-        risks = result.get("risks", [])
-        result["risk_quantification"] = self.quantify_risk(risks)
-        result["mitigation_plan"] = self.suggest_mitigation(risks)
-
-        logger.info(f"风险评估完成，风险等级: {result.get('risk_level', 'unknown')}")
-        return result
+        except Exception as e:
+            logger.error(f"风险评估Agent异常: {e}", exc_info=True)
+            # 异常时发布事件，写入错误状态，保证下游不会静默阻塞
+            error_result = {"error": str(e), "risk_level": "unknown", "risks": []}
+            self.write_shared("risk_result", error_result, MemoryLayer.ANALYSIS)
+            self.publish_event(BusinessEvent.RISK_ANALYZED, {"session_id": task.get("session_id")})
+            return error_result
+        finally:
+            self.set_running(False)
+            # 聚合屏障：递减计数器（归零时自动触发 ReportGenerator）
+            self.decrement_pending_count()
 
     async def _assess_with_llm(self, text: str, contract_type: str) -> Dict[str, Any]:
         """

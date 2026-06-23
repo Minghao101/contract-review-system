@@ -9,6 +9,8 @@ import logging
 from datetime import datetime
 
 from .base_agent import BaseAgent
+from .business_events import BusinessEvent
+from src.memory.memory_layer import MemoryLayer
 from src.utils.llm_response import extract_llm_content, parse_json_from_llm
 
 logger = logging.getLogger(__name__)
@@ -70,16 +72,25 @@ class DocumentParserAgent(BaseAgent):
         """
         处理解析任务
 
+        数据来源（优先级）：
+        1. 共享内存（事件驱动模式）
+        2. task 参数（兼容旧模式）
+
         Args:
-            task: 任务数据
-                - contract_text: 合同文本
-                - contract_type: 合同类型 (可选)
+            task: 任务数据（兼容旧模式）
 
         Returns:
             解析结果
         """
-        contract_text = task.get("contract_text", "")
-        specified_type = task.get("contract_type")
+        # 优先从共享内存读取（事件驱动模式）
+        contract_text = self.read_shared("contract_text", MemoryLayer.CONTEXT) or ""
+        specified_type = self.read_shared("contract_type", MemoryLayer.CONTEXT)
+
+        # 兼容旧模式：从 task 参数读取
+        if not contract_text:
+            contract_text = task.get("contract_text", "")
+        if not specified_type:
+            specified_type = task.get("contract_type")
 
         if not contract_text:
             return {"error": "合同文本为空"}
@@ -115,6 +126,12 @@ class DocumentParserAgent(BaseAgent):
             }
 
             logger.info(f"合同解析完成，类型: {standardized['contract_type']}，条款数: {len(standardized['sections'])}")
+
+            # 阶段1：写入共享内存 + 发布事件
+            self.write_shared("parsed_result", result, MemoryLayer.ANALYSIS)
+            self.publish_event(BusinessEvent.DOCUMENT_PARSED, {"session_id": task.get("session_id")})
+            logger.info(f"已发布事件: {BusinessEvent.DOCUMENT_PARSED}")
+
             return result
         finally:
             # 确保状态被重置

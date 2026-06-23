@@ -1,5 +1,10 @@
 """
 基础Agent模块 - 定义所有Agent的基类
+
+增强功能（阶段1弱中心化）：
+- bind_infrastructure(): 绑定共享内存和消息总线
+- read_shared() / write_shared(): 读写共享内存
+- publish_event(): 发布业务事件
 """
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
@@ -7,6 +12,7 @@ from datetime import datetime
 from langchain_core.language_models import BaseLLM
 
 from src.utils.llm_factory import get_llm
+from src.memory.memory_layer import MemoryLayer
 
 
 class BaseAgent(ABC):
@@ -47,12 +53,18 @@ class BaseAgent(ABC):
         self.created_at = datetime.now()
         self.last_active_at = datetime.now()
 
-        # 私有记忆
+        # 私有记忆（旧版兼容，新架构使用 AgentPrivateMemory）
         self.private_memory: Dict[str, Any] = {}
 
         # LangChain Agent包装器（延迟初始化）
         self._wrapper = None
         self._tools = tools
+
+        # 阶段1：基础设施绑定（由调度器在启动时调用）
+        self._shared_memory = None
+        self._message_bus = None
+        self._private_memory = None
+        self._on_all_analyses_complete = None  # 聚合屏障回调
 
     @property
     def wrapper(self):
@@ -85,6 +97,93 @@ class BaseAgent(ABC):
         if self._wrapper is not None:
             return self._wrapper.get_history()
         return []
+
+    # ==================== 阶段1：基础设施绑定 ====================
+
+    def bind_infrastructure(self, shared_memory, message_bus, on_all_complete=None):
+        """
+        绑定共享内存和消息总线（由调度器在启动时调用）
+
+        Args:
+            shared_memory: SharedMemoryManager 实例
+            message_bus: MessageBus 实例
+            on_all_complete: 可选回调，聚合屏障归零时调用
+        """
+        self._shared_memory = shared_memory
+        self._message_bus = message_bus
+        self._on_all_analyses_complete = on_all_complete
+        # 初始化私有记忆
+        from src.memory.private_memory import AgentPrivateMemory
+        self._private_memory = AgentPrivateMemory(self.agent_id)
+
+    def read_shared(self, key: str, layer: MemoryLayer) -> Optional[Any]:
+        """从共享内存读取数据"""
+        if self._shared_memory is None:
+            return None
+        return self._shared_memory.read(self.agent_id, key, layer)
+
+    def write_shared(self, key: str, value: Any, layer: MemoryLayer, validate: bool = True) -> int:
+        """写入共享内存"""
+        if self._shared_memory is None:
+            return 0
+        return self._shared_memory.write(self.agent_id, key, value, layer, validate=validate)
+
+    def decrement_pending_count(self) -> bool:
+        """
+        递减聚合屏障计数器。
+
+        每个分析 Agent 完成后调用此方法。当计数器归零时返回 True，
+        表示所有分析已完成，应触发 ReportGenerator。
+
+        Returns:
+            True 如果计数器归零（所有分析完成）
+        """
+        import logging
+        _logger = logging.getLogger(__name__)
+
+        if self._shared_memory is None:
+            return False
+
+        current = self._shared_memory.read("coordinator", "_pending_count", MemoryLayer.CONTEXT)
+        if current is None or current <= 0:
+            return False
+
+        new_count = current - 1
+        self._shared_memory.write(
+            "coordinator", "_pending_count", new_count, MemoryLayer.CONTEXT,
+            validate=False,
+        )
+
+        _logger.info(f"[{self.agent_id}] _pending_count: {current} → {new_count}")
+
+        # 归零时触发回调（通知调度器）
+        if new_count == 0 and self._on_all_analyses_complete:
+            _logger.info(f"[{self.agent_id}] 所有分析完成，触发 ReportGenerator")
+            self._on_all_analyses_complete()
+
+        return new_count == 0
+
+    def publish_event(self, event_type: str, data: Dict[str, Any] = None):
+        """
+        发布业务事件
+
+        Args:
+            event_type: 事件类型（使用 BusinessEvent 常量）
+            data: 事件附加数据
+        """
+        if self._message_bus is None:
+            return
+        from .communication import AgentMessage, MessageType
+        content = {"event": event_type}
+        if data:
+            content.update(data)
+        msg = AgentMessage(
+            sender_id=self.agent_id,
+            receiver_id="*",
+            message_type=MessageType.NOTIFICATION,
+            content=content,
+        )
+        self._message_bus.publish(msg)
 
     @abstractmethod
     async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:

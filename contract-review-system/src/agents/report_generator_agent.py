@@ -10,6 +10,8 @@ import logging
 from src.utils.llm_response import parse_json_from_llm
 
 from .base_agent import BaseAgent
+from .business_events import BusinessEvent
+from src.memory.memory_layer import MemoryLayer
 
 logger = logging.getLogger(__name__)
 
@@ -46,25 +48,68 @@ class ReportGeneratorAgent(BaseAgent):
         """
         处理报告生成任务
 
+        数据来源（优先级）：
+        1. 共享内存（事件驱动模式）
+        2. task 参数（兼容旧模式）
+
         Args:
-            task: 任务数据
-                - previous_results: 前面阶段的结果
+            task: 任务数据（兼容旧模式）
 
         Returns:
             报告生成结果
         """
-        previous_results = task.get("previous_results", {})
+        # 优先从共享内存读取所有分析结果（事件驱动模式）
+        previous_results = {}
+        parsed = self.read_shared("parsed_result", MemoryLayer.ANALYSIS)
+        risk = self.read_shared("risk_result", MemoryLayer.ANALYSIS)
+        clause = self.read_shared("clause_result", MemoryLayer.ANALYSIS)
+        compliance = self.read_shared("compliance_result", MemoryLayer.ANALYSIS)
 
-        logger.info("开始生成审查报告")
+        if parsed:
+            previous_results["document_parser"] = {"result": parsed}
+        if risk:
+            previous_results["risk_assessor"] = {"result": risk}
+        if clause:
+            previous_results["clause_analyst"] = {"result": clause}
+        if compliance:
+            previous_results["compliance_checker"] = {"result": compliance}
 
-        # LLM生成报告
-        result = await self._generate_with_llm(previous_results)
+        # 兼容旧模式：从 task 参数读取
+        if not previous_results:
+            previous_results = task.get("previous_results", {})
 
-        if "error" in result:
+        # 更新状态
+        self.set_running(True)
+        self.update_activity()
+
+        try:
+            logger.info("开始生成审查报告")
+
+            # LLM生成报告
+            result = await self._generate_with_llm(previous_results)
+
+            if "error" in result:
+                return result
+
+            logger.info("审查报告生成完成")
+
+            # 阶段1：写入共享内存 DECISION 层 + 发布事件
+            self.write_shared("final_report", result, MemoryLayer.DECISION)
+            risk_level = result.get("summary", {}).get("risk_level")
+            if risk_level:
+                self.write_shared("risk_level", risk_level, MemoryLayer.DECISION)
+            self.publish_event(BusinessEvent.TASK_COMPLETED, {"session_id": task.get("session_id")})
+            logger.info(f"已发布事件: {BusinessEvent.TASK_COMPLETED}")
+
             return result
-
-        logger.info("审查报告生成完成")
-        return result
+        except Exception as e:
+            logger.error(f"报告生成Agent异常: {e}", exc_info=True)
+            error_result = {"error": str(e), "report": {}, "summary": {"risk_level": "unknown"}, "generated_at": datetime.now().isoformat()}
+            self.write_shared("final_report", error_result, MemoryLayer.DECISION)
+            self.publish_event(BusinessEvent.TASK_COMPLETED, {"session_id": task.get("session_id")})
+            return error_result
+        finally:
+            self.set_running(False)
 
     async def _generate_with_llm(self, previous_results: Dict[str, Any]) -> Dict[str, Any]:
         """

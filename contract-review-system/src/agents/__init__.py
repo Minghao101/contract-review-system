@@ -3,6 +3,7 @@ Agent模块 - 包含所有Agent实现
 """
 
 from .base_agent import BaseAgent
+from .business_events import BusinessEvent
 from .communication import AgentMessage, MessageType, MessageBus, message_bus
 from .coordinator_agent import CoordinatorAgent
 from .document_parser_agent import DocumentParserAgent
@@ -21,6 +22,7 @@ from .multi_turn_handler import MultiTurnHandler
 
 __all__ = [
     "BaseAgent",
+    "BusinessEvent",
     "AgentMessage",
     "MessageType",
     "MessageBus",

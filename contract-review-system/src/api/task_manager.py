@@ -286,8 +286,9 @@ class TaskManager:
         """
         将MultiTurnHandler的嵌套结果扁平化为前端可直接使用的格式
 
-        MultiTurnHandler返回: {agent_name: {status, result: {actual_data}}}
-        扁平化后返回: {actual_data_keys...}
+        支持两种结果结构：
+        - 旧格式: {agent_name: {status, result: {actual_data}}}
+        - 新格式（事件驱动）: {agent_name: {actual_data}} 或 {key: actual_data}
         """
         agent_results = handler_result.get("result") or {}
         flat = {}
@@ -295,10 +296,17 @@ class TaskManager:
         # 提取各agent的实际结果
         if isinstance(agent_results, dict):
             for agent_name, agent_data in agent_results.items():
-                if isinstance(agent_data, dict) and agent_data.get("status") == "completed":
-                    actual = agent_data.get("result", {})
-                    if isinstance(actual, dict):
-                        flat.update(actual)
+                if isinstance(agent_data, dict):
+                    # 新格式：直接是结果数据
+                    if "status" not in agent_data or "result" in agent_data:
+                        actual = agent_data.get("result", agent_data)
+                        if isinstance(actual, dict):
+                            flat.update(actual)
+                    # 旧格式：{status, result: {...}}
+                    elif agent_data.get("status") == "completed":
+                        actual = agent_data.get("result", {})
+                        if isinstance(actual, dict):
+                            flat.update(actual)
 
         # 保留元信息
         flat["status"] = handler_result.get("intent", {}).get("type", "contract_review")

@@ -9,6 +9,8 @@ import logging
 from src.utils.llm_response import parse_json_from_llm
 
 from .base_agent import BaseAgent
+from .business_events import BusinessEvent
+from src.memory.memory_layer import MemoryLayer
 
 logger = logging.getLogger(__name__)
 
@@ -56,29 +58,59 @@ class ComplianceCheckerAgent(BaseAgent):
         """
         处理合规检查任务
 
+        数据来源（优先级）：
+        1. 共享内存（事件驱动模式）
+        2. task 参数（兼容旧模式）
+
         Args:
-            task: 任务数据
-                - contract_text: 合同文本
-                - contract_type: 合同类型 (可选)
+            task: 任务数据（兼容旧模式）
 
         Returns:
             合规检查结果
         """
-        contract_text = task.get("contract_text", "")
-        contract_type = task.get("contract_type", "general")
+        # 优先从共享内存读取（事件驱动模式）
+        contract_text = self.read_shared("contract_text", MemoryLayer.CONTEXT) or ""
+        contract_type = self.read_shared("contract_type", MemoryLayer.CONTEXT) or "general"
+
+        # 兼容旧模式：从 task 参数读取
+        if not contract_text:
+            contract_text = task.get("contract_text", "")
+        if contract_type == "general":
+            contract_type = task.get("contract_type", "general")
 
         if not contract_text:
             return {"error": "合同文本为空"}
 
-        logger.info(f"开始合规检查，合同类型: {contract_type}，文本长度: {len(contract_text)}")
+        # 更新状态
+        self.set_running(True)
+        self.update_activity()
 
-        result = await self._check_with_llm(contract_text, contract_type)
+        try:
+            logger.info(f"开始合规检查，合同类型: {contract_type}，文本长度: {len(contract_text)}")
 
-        if "error" in result:
+            result = await self._check_with_llm(contract_text, contract_type)
+
+            if "error" in result:
+                return result
+
+            logger.info(f"合规检查完成，合规状态: {result.get('compliance_status', 'unknown')}")
+
+            # 阶段1：写入共享内存 + 发布事件
+            self.write_shared("compliance_result", result, MemoryLayer.ANALYSIS)
+            self.publish_event(BusinessEvent.COMPLIANCE_CHECKED, {"session_id": task.get("session_id")})
+            logger.info(f"已发布事件: {BusinessEvent.COMPLIANCE_CHECKED}")
+
             return result
-
-        logger.info(f"合规检查完成，合规状态: {result.get('compliance_status', 'unknown')}")
-        return result
+        except Exception as e:
+            logger.error(f"合规检查Agent异常: {e}", exc_info=True)
+            error_result = {"error": str(e), "compliance_status": "unknown", "checked_regulations": [], "missing_clauses": [], "compliance_violations": [], "score": 0, "summary": {}}
+            self.write_shared("compliance_result", error_result, MemoryLayer.ANALYSIS)
+            self.publish_event(BusinessEvent.COMPLIANCE_CHECKED, {"session_id": task.get("session_id")})
+            return error_result
+        finally:
+            self.set_running(False)
+            # 聚合屏障：递减计数器（归零时自动触发 ReportGenerator）
+            self.decrement_pending_count()
 
     async def _check_with_llm(self, text: str, contract_type: str) -> Dict[str, Any]:
         """

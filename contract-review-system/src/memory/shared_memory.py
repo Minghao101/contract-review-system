@@ -1,13 +1,35 @@
 """
 共享记忆模块 - Agent间共享记忆管理
+
+增强功能（阶段1）：
+- 写入时 Schema 校验（核心业务数据强制校验）
+- 读取时类型化返回
 """
 from typing import Any, Callable, Dict, List, Optional
 from datetime import datetime
 from threading import Lock
 import json
 import hashlib
+import logging
 
 from .memory_layer import MemoryLayer
+
+logger = logging.getLogger(__name__)
+
+# 延迟导入 Schema 校验器（避免循环引用）
+_schema_validator = None
+
+
+def _get_schema_validator():
+    """延迟加载 Schema 校验器"""
+    global _schema_validator
+    if _schema_validator is None:
+        try:
+            from src.agents.shared_data_schemas import validate_shared_data
+            _schema_validator = validate_shared_data
+        except ImportError:
+            _schema_validator = lambda k, v: True  # 降级：不校验
+    return _schema_validator
 
 
 class MemoryEntry:
@@ -79,7 +101,8 @@ class SharedMemoryManager:
         agent_id: str,
         key: str,
         value: Any,
-        layer: MemoryLayer
+        layer: MemoryLayer,
+        validate: bool = True,
     ) -> int:
         """
         写入共享记忆
@@ -89,10 +112,21 @@ class SharedMemoryManager:
             key: 记忆键
             value: 记忆值
             layer: 记忆层次
+            validate: 是否进行 Schema 校验（核心业务数据默认校验）
 
         Returns:
-            版本号
+            版本号，校验失败返回 -1
         """
+        # Schema 校验
+        if validate:
+            validator = _get_schema_validator()
+            if not validator(key, value):
+                logger.warning(
+                    f"共享数据校验失败: key={key}, agent={agent_id}, layer={layer.value}。"
+                    f"数据不符合 Schema 定义，拒绝写入。"
+                )
+                return -1
+
         with self._lock:
             # 检查是否已存在
             if key in self._store[layer]:

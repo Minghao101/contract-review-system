@@ -9,6 +9,8 @@ import logging
 from src.utils.llm_response import parse_json_from_llm
 
 from .base_agent import BaseAgent
+from .business_events import BusinessEvent
+from src.memory.memory_layer import MemoryLayer
 
 logger = logging.getLogger(__name__)
 
@@ -45,30 +47,60 @@ class ClauseAnalysisAgent(BaseAgent):
         """
         处理条款分析任务
 
+        数据来源（优先级）：
+        1. 共享内存（事件驱动模式）
+        2. task 参数（兼容旧模式）
+
         Args:
-            task: 任务数据
-                - contract_text: 合同文本
-                - review_focus: 审查重点 (可选)
+            task: 任务数据（兼容旧模式）
 
         Returns:
             分析结果
         """
-        contract_text = task.get("contract_text", "")
-        review_focus = task.get("review_focus", [])
+        # 优先从共享内存读取（事件驱动模式）
+        contract_text = self.read_shared("contract_text", MemoryLayer.CONTEXT) or ""
+        review_focus = self.read_shared("review_focus", MemoryLayer.CONTEXT) or []
+
+        # 兼容旧模式：从 task 参数读取
+        if not contract_text:
+            contract_text = task.get("contract_text", "")
+        if not review_focus:
+            review_focus = task.get("review_focus", [])
 
         if not contract_text:
             return {"error": "合同文本为空"}
 
-        logger.info(f"开始分析合同条款，文本长度: {len(contract_text)}")
+        # 更新状态
+        self.set_running(True)
+        self.update_activity()
 
-        # 单次LLM调用完成所有分析
-        result = await self._analyze_with_llm(contract_text, review_focus)
+        try:
+            logger.info(f"开始分析合同条款，文本长度: {len(contract_text)}")
 
-        if "error" in result:
+            # 单次LLM调用完成所有分析
+            result = await self._analyze_with_llm(contract_text, review_focus)
+
+            if "error" in result:
+                return result
+
+            logger.info(f"条款分析完成，发现问题: {result.get('issues_found', 0)}个")
+
+            # 阶段1：写入共享内存 + 发布事件
+            self.write_shared("clause_result", result, MemoryLayer.ANALYSIS)
+            self.publish_event(BusinessEvent.CLAUSE_ANALYZED, {"session_id": task.get("session_id")})
+            logger.info(f"已发布事件: {BusinessEvent.CLAUSE_ANALYZED}")
+
             return result
-
-        logger.info(f"条款分析完成，发现问题: {result.get('issues_found', 0)}个")
-        return result
+        except Exception as e:
+            logger.error(f"条款分析Agent异常: {e}", exc_info=True)
+            error_result = {"error": str(e), "sections": {}, "analysis": {}, "missing_clauses": [], "issues_found": 0, "issues": []}
+            self.write_shared("clause_result", error_result, MemoryLayer.ANALYSIS)
+            self.publish_event(BusinessEvent.CLAUSE_ANALYZED, {"session_id": task.get("session_id")})
+            return error_result
+        finally:
+            self.set_running(False)
+            # 聚合屏障：递减计数器（归零时自动触发 ReportGenerator）
+            self.decrement_pending_count()
 
     async def _analyze_with_llm(self, text: str, review_focus: List[str]) -> Dict[str, Any]:
         """

@@ -1,10 +1,19 @@
 """
 Agent通信模块 - 定义Agent间通信协议
+
+增强功能：
+- publish_async(): 异步发布（Agent 事件驱动协作）
+- 事件历史记录（调试用）
+- clear(): 会话结束时清理订阅和历史
 """
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 from datetime import datetime
 from enum import Enum
 import uuid
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class MessageType(Enum):
@@ -74,25 +83,35 @@ class AgentMessage:
 
 
 class MessageBus:
-    """消息总线 - 管理Agent间消息传递"""
+    """
+    消息总线 - 管理Agent间消息传递
+
+    支持：
+    - 同步发布 publish()
+    - 异步发布 publish_async()（Agent 事件驱动协作）
+    - 事件历史记录（调试用）
+    - 订阅管理（支持通配符接收者 "*"）
+    - clear() 清理（会话结束时）
+    """
 
     def __init__(self):
         self._subscribers: Dict[str, list] = {}
         self._message_queue: list = []
+        self._event_history: list = []  # 事件历史（调试用）
 
-    def subscribe(self, agent_id: str, callback):
+    def subscribe(self, agent_id: str, callback: Callable):
         """
         订阅消息
 
         Args:
-            agent_id: Agent ID
-            callback: 回调函数
+            agent_id: Agent ID（"*" 表示订阅所有消息）
+            callback: 回调函数 callback(message)
         """
         if agent_id not in self._subscribers:
             self._subscribers[agent_id] = []
         self._subscribers[agent_id].append(callback)
 
-    def unsubscribe(self, agent_id: str, callback=None):
+    def unsubscribe(self, agent_id: str, callback: Callable = None):
         """
         取消订阅
 
@@ -113,17 +132,59 @@ class MessageBus:
 
     def publish(self, message: AgentMessage):
         """
-        发布消息
+        同步发布消息
 
-        Args:
-            message: 消息对象
+        通知所有匹配的订阅者（receiver_id 精确匹配或订阅者为 "*"）。
         """
         self._message_queue.append(message)
+        self._record_event(message)
 
         # 通知订阅者
-        if message.receiver_id in self._subscribers:
-            for callback in self._subscribers[message.receiver_id]:
-                callback(message)
+        for agent_id, callbacks in self._subscribers.items():
+            if agent_id == message.receiver_id or agent_id == "*":
+                for callback in callbacks:
+                    try:
+                        callback(message)
+                    except Exception as e:
+                        logger.error(f"消息回调失败 [{agent_id}]: {e}")
+
+    async def publish_async(self, message: AgentMessage):
+        """
+        异步发布消息
+
+        用于 Agent 事件驱动协作，回调为异步函数时自动 await。
+        """
+        self._message_queue.append(message)
+        self._record_event(message)
+
+        for agent_id, callbacks in self._subscribers.items():
+            if agent_id == message.receiver_id or agent_id == "*":
+                for callback in callbacks:
+                    try:
+                        if asyncio.iscoroutinefunction(callback):
+                            await callback(message)
+                        else:
+                            callback(message)
+                    except Exception as e:
+                        logger.error(f"异步消息回调失败 [{agent_id}]: {e}")
+
+    def _record_event(self, message: AgentMessage):
+        """记录事件历史（调试用）"""
+        self._event_history.append({
+            "message_id": message.message_id,
+            "sender": message.sender_id,
+            "receiver": message.receiver_id,
+            "type": message.message_type.value,
+            "content_keys": list(message.content.keys()) if isinstance(message.content, dict) else [],
+            "timestamp": message.timestamp.isoformat(),
+        })
+        # 只保留最近 100 条
+        if len(self._event_history) > 100:
+            self._event_history = self._event_history[-100:]
+
+    def get_event_history(self, limit: int = 50) -> list:
+        """获取事件历史（调试用）"""
+        return self._event_history[-limit:]
 
     def get_messages(self, agent_id: str) -> list:
         """获取指定Agent的消息"""
@@ -138,6 +199,12 @@ class MessageBus:
             msg for msg in self._message_queue
             if msg.receiver_id != agent_id
         ]
+
+    def clear(self):
+        """清理所有订阅和消息（会话结束时调用）"""
+        self._subscribers.clear()
+        self._message_queue.clear()
+        self._event_history.clear()
 
 
 # 全局消息总线实例
