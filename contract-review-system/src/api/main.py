@@ -10,10 +10,15 @@ from config.settings import get_settings
 
 # 配置根日志 - 强制输出到控制台
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     force=True,
 )
+
+# 屏蔽噪声库的 DEBUG 日志（避免打印请求体/合同内容）
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("anthropic").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 

@@ -29,6 +29,7 @@ class IntentType(str, Enum):
     RISK_ASSESSMENT = "risk_assessment"
     COMPLIANCE_CHECK = "compliance_check"
     REPORT_GENERATION = "report_generation"
+    MODIFY_CONTRACT = "modify_contract"
     QUESTION_ANSWER = "question_answer"
     GREETING = "greeting"
     UNKNOWN = "unknown"
@@ -85,6 +86,7 @@ INTENT_DESCRIPTIONS = {
     IntentType.RISK_ASSESSMENT: "风险评估。当用户提到'风险'、要求评估风险、分析风险时使用",
     IntentType.COMPLIANCE_CHECK: "合规检查。当用户提到'合规'、'合法'、要求检查合规性时使用",
     IntentType.REPORT_GENERATION: "报告生成。当用户要求生成、导出、输出报告时使用",
+    IntentType.MODIFY_CONTRACT: "修改合同条款。当用户要求修改某个条款的内容，如'把第三条的违约金从5%改成3%'、'删除第X条'、'增加一条...'时使用",
     IntentType.QUESTION_ANSWER: "回答关于合同的问题。当用户提问但不涉及审查/分析/评估时使用",
     IntentType.GREETING: "问候语。当用户打招呼时使用",
     IntentType.UNKNOWN: "无法识别的意图",
@@ -169,15 +171,22 @@ class IntentRecognizer:
 核心规则（按优先级）：
 1. 用户打招呼 → greeting
 2. 用户追问之前的结果（"之前"、"刚才"、"哪一份"、"第一条"、"第二条"、"什么意思"、"解释一下"、"详细说说"、"为什么"） → question_answer
-3. 用户提到"风险"或要求评估风险 → risk_assessment（即使用户说"分析风险"也是risk_assessment，不是contract_review）
-4. 用户提到"合规"或要求检查合规 → compliance_check
-5. 用户提到"条款"或要求分析条款 → clause_analysis
-6. 用户要求生成/导出报告 → report_generation
-7. 只有用户明确说"完整审查"、"全面审查"、"整体审查" → contract_review
-8. 其他提问 → question_answer
-9. 无法判断 → unknown
+3. 用户要求修改条款 → modify_contract。关键词包括：
+   - "把第X条...改成..."、"删除第X条"、"增加一条..."、"修改..."
+   - "加上..."、"添加..."、"加入..."、"补充..."
+   - "改成..."、"改为..."、"换成..."、"替换..."
+   - "去掉..."、"移除..."
+   - 注意：如果用户说"加上XX，再评估风险"，主意图是modify_contract（修改优先于分析）
+4. 用户提到"风险"或要求评估风险 → risk_assessment（即使用户说"分析风险"也是risk_assessment，不是contract_review）
+5. 用户提到"合规"或要求检查合规 → compliance_check
+6. 用户提到"条款"或要求分析条款 → clause_analysis
+7. 用户要求生成/导出报告 → report_generation
+8. 只有用户明确说"完整审查"、"全面审查"、"整体审查" → contract_review
+9. 其他提问 → question_answer
+10. 无法判断 → unknown
 
 重要：
+- 修改意图优先于分析意图！如果用户同时要求"修改+分析"，识别为modify_contract
 - 用户问"这个合同有什么风险"是risk_assessment，不是contract_review！
 - 如果对话轮数>0，用户问"第X条建议什么意思"、"解释一下"、"为什么"等，都是question_answer，是在追问之前的结果！
 

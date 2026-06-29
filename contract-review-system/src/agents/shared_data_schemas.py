@@ -56,13 +56,25 @@ class ReportResult(BaseModel):
     generated_at: str = Field(default_factory=lambda: datetime.now().isoformat(), description="生成时间")
 
 
-# 共享内存 Schema 注册表：key → Schema 类
+class ModifyInstruction(BaseModel):
+    """增量修改指令（LLM 解析用户意图后生成）"""
+    action: str = Field(description="修改动作: replace/delete/insert")
+    locate_type: str = Field(description="定位方式: clause_number/clause_title/semantic")
+    locate_value: str = Field(description="定位值: '第三条'/'违约责任'/'关于付款的条款'")
+    old_content: Optional[str] = Field(default=None, description="被替换的原文片段（replace 时必填）")
+    new_content: Optional[str] = Field(default=None, description="新内容（replace/insert 时必填）")
+    target_scope: str = Field(default="single_clause", description="影响范围: single_clause/multiple_clauses/full_document")
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0, description="定位置信度")
+
+
+# 共享内存 Schema 注册表：key → Schema 类（key 与 agent_id 一致）
 SHARED_DATA_SCHEMAS: Dict[str, type] = {
-    "parsed_result": DocumentParseResult,
-    "risk_result": RiskAssessmentResult,
-    "clause_result": ClauseAnalysisResult,
-    "compliance_result": ComplianceCheckResult,
-    "final_report": ReportResult,
+    "document_parser": DocumentParseResult,
+    "risk_assessor": RiskAssessmentResult,
+    "clause_analyst": ClauseAnalysisResult,
+    "compliance_checker": ComplianceCheckResult,
+    "report_generator": ReportResult,
+    "modify_instruction": ModifyInstruction,
 }
 
 

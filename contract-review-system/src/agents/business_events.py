@@ -27,5 +27,8 @@ class BusinessEvent:
     # 合规检查完成（ComplianceCheckerAgent 发布）
     COMPLIANCE_CHECKED = "compliance.checked"
 
+    # 条款修改完成（DocumentParser 发布）
+    CLAUSE_UPDATED = "clause.updated"
+
     # 所有分析完成（ReportGenerator 发布）
     TASK_COMPLETED = "task.completed"

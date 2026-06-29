@@ -46,6 +46,7 @@ class LLMFactory:
             base_url=self.settings.LLM_API_BASE,
             temperature=self.settings.LLM_TEMPERATURE,
             max_tokens=self.settings.LLM_MAX_TOKENS,
+            thinking={"type": "disabled"},
         )
 
     def _create_openai_llm(self) -> BaseLLM:

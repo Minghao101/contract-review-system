@@ -130,12 +130,19 @@ async def review_stream(request: ContractReviewRequest):
 
 def _format_stream_result(result: dict, review_focus: list = None) -> str:
     """将审查结果格式化为流式文本"""
-    # 如果是追问类回答（question_answer），直接返回 response
-    if result.get("response") and not result.get("risks") and not result.get("document_info"):
+    # 如果有 response（来自 _format_response），直接使用
+    # 覆盖：追问、修改、单Agent分析等场景
+    if result.get("response"):
         response = result["response"]
         if not isinstance(response, str):
             response = str(response)
-        return response
+        # intent type 存在 result["status"] 中（_flatten_agent_results 写入）
+        intent_type = result.get("status", "")
+        if intent_type in ("modify_contract", "question_answer", "greeting", "unknown"):
+            return response
+        # 非全量审查意图：也直接返回 response
+        if intent_type and intent_type != "contract_review":
+            return response
 
     lines = []
     focus = review_focus[0] if review_focus else "合同审查"

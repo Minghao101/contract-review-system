@@ -60,10 +60,10 @@ class ReportGeneratorAgent(BaseAgent):
         """
         # 优先从共享内存读取所有分析结果（事件驱动模式）
         previous_results = {}
-        parsed = self.read_shared("parsed_result", MemoryLayer.ANALYSIS)
-        risk = self.read_shared("risk_result", MemoryLayer.ANALYSIS)
-        clause = self.read_shared("clause_result", MemoryLayer.ANALYSIS)
-        compliance = self.read_shared("compliance_result", MemoryLayer.ANALYSIS)
+        parsed = self.read_shared("document_parser", MemoryLayer.ANALYSIS)
+        risk = self.read_shared("risk_assessor", MemoryLayer.ANALYSIS)
+        clause = self.read_shared("clause_analyst", MemoryLayer.ANALYSIS)
+        compliance = self.read_shared("compliance_checker", MemoryLayer.ANALYSIS)
 
         if parsed:
             previous_results["document_parser"] = {"result": parsed}
@@ -94,7 +94,7 @@ class ReportGeneratorAgent(BaseAgent):
             logger.info("审查报告生成完成")
 
             # 阶段1：写入共享内存 DECISION 层 + 发布事件
-            self.write_shared("final_report", result, MemoryLayer.DECISION)
+            self.write_shared("report_generator", result, MemoryLayer.DECISION, validate=False)
             risk_level = result.get("summary", {}).get("risk_level")
             if risk_level:
                 self.write_shared("risk_level", risk_level, MemoryLayer.DECISION)
@@ -105,7 +105,7 @@ class ReportGeneratorAgent(BaseAgent):
         except Exception as e:
             logger.error(f"报告生成Agent异常: {e}", exc_info=True)
             error_result = {"error": str(e), "report": {}, "summary": {"risk_level": "unknown"}, "generated_at": datetime.now().isoformat()}
-            self.write_shared("final_report", error_result, MemoryLayer.DECISION)
+            self.write_shared("report_generator", error_result, MemoryLayer.DECISION, validate=False)
             self.publish_event(BusinessEvent.TASK_COMPLETED, {"session_id": task.get("session_id")})
             return error_result
         finally:
@@ -121,10 +121,10 @@ class ReportGeneratorAgent(BaseAgent):
         Returns:
             报告结果
         """
-        # 提取各阶段结果
-        document_info = previous_results.get("parse_document", {}).get("result", {})
-        clause_analysis = previous_results.get("analyze_clauses", {}).get("result", {})
-        risk_assessment = previous_results.get("assess_risks", {}).get("result", {})
+        # 提取各阶段结果（key 与 Agent 写入的 agent_id 一致）
+        document_info = previous_results.get("document_parser", {}).get("result", {})
+        clause_analysis = previous_results.get("clause_analyst", {}).get("result", {})
+        risk_assessment = previous_results.get("risk_assessor", {}).get("result", {})
 
         # 准备上下文
         context = {

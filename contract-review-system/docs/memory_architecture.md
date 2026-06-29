@@ -2,14 +2,14 @@
 
 ## 一、整体架构
 
-项目设计了 4 层记忆，但实际在用的只有 2 层：
+项目设计了 4 层记忆，全部在用：
 
-| 层级 | 模块 | 存储介质 | 是否在用 | 用途 |
-|------|------|----------|----------|------|
-| 对话上下文 | `ConversationContext` | 内存（Python对象） | **在用** | 多轮对话的状态管理 |
-| 长期记忆 | `LongTermMemory` | Qdrant 向量数据库 | **在用** | 跨会话的审查历史持久化 |
-| Agent私有记忆 | `AgentPrivateMemory` | 内存 | **未使用** | 设计了但未接入 |
-| 共享记忆 | `SharedMemoryManager` | 内存 | **未使用** | 设计了但未接入 |
+| 层级 | 模块 | 存储介质 | 用途 |
+|------|------|----------|------|
+| 对话上下文 | `ConversationContext` | 内存（Python对象） | 多轮对话的状态管理 |
+| 长期记忆 | `LongTermMemory` | Qdrant 向量数据库 | 跨会话的审查历史持久化 |
+| Agent私有记忆 | `AgentPrivateMemory` | 内存 | Agent 级缓存（增量分析结果缓存） |
+| 共享记忆 | `SharedMemoryManager` | 内存 | Agent 间事件驱动协作的数据通道 |
 
 ---
 
@@ -47,7 +47,7 @@ ConversationContext
 | `_shared_data` | Agent间传递的中间数据 | 合同上传、Agent间传递 | Agent执行时读取 |
 | `_intent_chain` | 意图识别历史 | 每轮意图识别后 | 意图识别时读取上一轮意图 |
 
-### `_shared_data` 只存这些
+### `_shared_data` 只存这些（遗留机制）
 
 ```python
 {
@@ -56,6 +56,8 @@ ConversationContext
     "parsed_result": {...},                   # Agent间传递（document_parser → risk_assessor）
 }
 ```
+
+**注意**：Agent 间的主要数据传递已迁移到 `SharedMemoryManager`（三层存储）。`_shared_data` 仅作为遗留兼容保留。
 
 **不存** Agent 最终执行结果，Agent 结果存在 `_turns[*].agent_results` 中。
 
@@ -122,6 +124,9 @@ LLM 收到的 prompt：
     │
     ▼
 重启后端服务 → _sessions 字典清空 → 所有 context 丢失
+    │
+    ▼
+Runtime 生命周期: _runtimes[session_id] 保留跨请求，重启后清空
 ```
 
 ### 存储位置
@@ -195,119 +200,354 @@ results = memory.get_review_history(top_k=10)
 
 ---
 
-## 四、AgentPrivateMemory（私有记忆）— 未使用
+## 四、AgentPrivateMemory（私有记忆）— 缓存层
 
 ### 文件位置
 `src/memory/private_memory.py`
 
-### 设计用途
-每个 Agent 独立的记忆空间，包含：
-- `context_window`: 上下文窗口（deque，支持压缩）
-- `compressed_summary`: 压缩后的摘要
-- `task_state`: 任务状态
-- `cache`: 缓存（支持 TTL 过期）
+### 实际用途
+每个 Agent 独立的记忆空间，当前主要用于**增量分析缓存**：
+- `cache`: 缓存上次的完整分析结果，供增量修改时复用
+- `context_window`: 上下文窗口（预留，支持压缩）
+- `task_state`: 任务状态（预留）
 
-### 实际状态
-定义了但未被任何 Agent 或 Handler 实例化使用。
+### 初始化
+`BaseAgent.bind_infrastructure()` 中自动创建：
+```python
+self._private_memory = AgentPrivateMemory(self.agent_id)
+```
+
+### 缓存使用场景（增量修改）
+
+**写入缓存**：每次全量分析完成后
+```python
+# 在 RiskAssessmentAgent/ClauseAnalysisAgent/ComplianceCheckerAgent 的 process() 中
+self._private_memory.set_cache("last_result", result)
+```
+
+**读取缓存**：增量修改时
+```python
+# Agent 检测到 modify_contract 意图
+cached = self._private_memory.get_cache("last_result")
+if cached:
+    # 只重新分析修改后的条款，合并到 cached 结果
+    return await self._incremental_analyze(updated_clause, cached)
+else:
+    # 无缓存（首次分析），走全量分析
+    return await self._full_analyze(...)
+```
+
+### 缓存键
+
+| 键名 | 值 | 用途 |
+|------|-----|------|
+| `{session_id}:last_result` | 完整分析结果 dict | 增量修改时复用，按会话隔离 |
+
+缓存键通过 `_get_cache_key()` 生成，从共享内存读取 `session_id`：
+```python
+def _get_cache_key(self) -> str:
+    session_id = self.read_shared("session_id", MemoryLayer.CONTEXT) or "default"
+    return f"{session_id}:last_result"
+```
+
+这样不同会话的缓存互不干扰，同一会话内可复用上次分析结果。
 
 ---
 
-## 五、SharedMemoryManager（共享记忆）— 未使用
+## 五、SharedMemoryManager（共享记忆）— 事件驱动核心
 
 ### 文件位置
 `src/memory/shared_memory.py`
 
-### 设计用途
-Agent 间共享记忆，支持：
-- 分层存储（CONTEXT / ANALYSIS / DECISION）
-- 版本控制
-- 读写锁（线程安全）
-- 变更通知（观察者模式）
+### 实际用途
+事件驱动架构的核心数据通道，Agent 间通过共享内存传递数据。
 
-### 实际状态
-定义了但未被使用。Agent 间的数据传递目前通过 `ConversationContext._shared_data` 实现。
+### 三层存储
+
+| 层级 | MemoryLayer | 用途 | 写入方 | 读取方 |
+|------|-------------|------|--------|--------|
+| CONTEXT | `MemoryLayer.CONTEXT` | 原始输入（只读） | 调度器 | 所有 Agent |
+| ANALYSIS | `MemoryLayer.ANALYSIS` | Agent 分析结果 | 各 Agent | 下游 Agent / 调度器 |
+| DECISION | `MemoryLayer.DECISION` | 最终报告 | ReportGenerator | 调度器 |
+
+### CONTEXT 层数据（调度器写入，Agent 只读）
+
+| 键名 | 值 | 用途 |
+|------|-----|------|
+| `contract_text` | 合同原文 | 所有 Agent 的输入 |
+| `contract_type` | 合同类型 | 合规检查等使用 |
+| `intent_type` | 意图类型 | Agent 判断是否走增量分支 |
+| `session_id` | 会话 ID | 事件发布时携带 |
+| `user_message` | 用户原始消息 | 修改指令解析使用 |
+| `_pending_count` | 待完成 Agent 数 | 聚合屏障计数器 |
+| `_required_agents` | 需要执行的 Agent 列表 | 调度器按需执行 |
+
+### ANALYSIS 层数据（各 Agent 写入，key = agent_id）
+
+| 键名 | 写入方 | 值类型 |
+|------|--------|--------|
+| `document_parser` | DocumentParserAgent | DocumentParseResult |
+| `risk_assessor` | RiskAssessmentAgent | RiskAssessmentResult |
+| `clause_analyst` | ClauseAnalysisAgent | ClauseAnalysisResult |
+| `compliance_checker` | ComplianceCheckerAgent | ComplianceCheckResult |
+| `modify_instruction` | MultiTurnHandler | ModifyInstruction |
+| `updated_clause` | DocumentParserAgent | 更新后的条款 |
+
+### DECISION 层数据
+
+| 键名 | 写入方 | 值类型 |
+|------|--------|--------|
+| `report_generator` | ReportGeneratorAgent | ReportResult |
+| `risk_level` | ReportGeneratorAgent | str |
+
+### Agent 读写模式
+
+```python
+# 读取
+contract_text = self.read_shared("contract_text", MemoryLayer.CONTEXT)
+
+# 写入（带 Schema 校验）
+self.write_shared("risk_result", result, MemoryLayer.ANALYSIS)
+
+# 写入（跳过校验，内部字段）
+self.write_shared("_pending_count", 2, MemoryLayer.CONTEXT, validate=False)
+```
+
+### 初始化流程
+
+```python
+# MultiTurnHandler.__init__()
+# 创建 RuntimeProxy / MessageBusProxy（Agent 绑定 proxy 而非具体实例）
+self._sm_proxy = RuntimeProxy(lambda sid: self._runtimes.get(sid))
+self._bus_proxy = MessageBusProxy(lambda sid: self._runtimes.get(sid))
+
+# MultiTurnHandler.handle_message()
+runtime = self._init_runtime(session_id, ...)       # 创建独立 SharedMemoryManager
+token = _current_session_id.set(session_id)          # 设置 contextvar
+
+for agent in self._agents.values():
+    agent.bind_infrastructure(
+        self._sm_proxy,          # proxy（非具体 SharedMemoryManager）
+        self._bus_proxy,         # proxy（非具体 MessageBus）
+        on_all_complete=self._make_on_complete_callback(runtime),
+    )
+# ... 执行完成 ...
+_current_session_id.reset(token)                     # 释放 contextvar
+```
 
 ---
 
 ## 六、完整数据流图
 
+### 6.1 全量审查流程
+
 ```
-┌─────────────────────────────────────────────────────┐
-│                    前端 (Streamlit)                    │
-│                                                       │
-│  st.session_state["messages"] = [                     │
-│    {role: "user", content: "..."},                    │
-│    {role: "assistant", content: "..."},               │
-│  ]                                                    │
-│  st.session_state["session_id"] = "abc-123"           │
-└──────────────────────┬──────────────────────────────┘
-                       │ POST /api/v1/review/stream
-                       │ {contract_text, session_id, review_focus}
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│              task_manager.process_sync()               │
-│                                                       │
-│  1. 调用 multi_turn_handler.handle_message()          │
-│  2. 扁平化结果 _flatten_agent_results()               │
-│  3. 保存到 LongTermMemory (Qdrant)                    │
-└──────────────────────┬──────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│          multi_turn_handler.handle_message()           │
-│                                                       │
-│  ctx = conversation_manager.get_or_create(session_id) │
-│                                                       │
-│  ┌─ ConversationContext ─────────────────────────┐   │
-│  │                                                │   │
-│  │  _messages: [用户消息, 助手回复, ...]           │   │
-│  │  _turns: [                                       │   │
-│  │    TurnContext(                                  │   │
-│  │      intent="risk_assessment",                   │   │
-│  │      agent_results={"risk_assessor": {...}}      │   │
-│  │    ),                                            │   │
-│  │  ]                                               │   │
-│  │  _shared_data: {                                 │   │
-│  │    "contract_text": "...",                       │   │
-│  │    "contract_filename": "...",                   │   │
-│  │    "parsed_result": {...},  ← Agent间传递        │   │
-│  │  }                                               │   │
-│  │  _intent_chain: ["risk_assessment", ...]         │   │
-│  └────────────────────────────────────────────────┘   │
-│                                                       │
-│  Agent执行结果 → 写入 _turns[*].agent_results          │
-│  Agent间中间数据 → 写入 _shared_data                   │
-│                                                       │
-│  追问时：                                              │
-│    context = 合同内容(_shared_data["contract_text"])    │
-│            + 对话历史(_messages)                        │
-│    → 发给 LLM 生成回答                                 │
-└─────────────────────────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│              LongTermMemory (Qdrant)                  │
-│                                                       │
-│  审查完成后自动保存：                                   │
-│  {type: "review", contract_name, memory_text, ...}    │
-│                                                       │
-│  查询：语义检索历史审查记录                              │
-│  API: GET /memory/recall, GET /memory/history         │
-└─────────────────────────────────────────────────────┘
+用户: "全面审查这个合同"
+    │
+    ▼
+MultiTurnHandler.handle_message()
+    │
+    ├─→ IntentRecognizer: "contract_review"
+    │
+    ├─→ _init_runtime()
+    │     SharedMemoryManager 写入 CONTEXT 层:
+    │       contract_text, contract_type, intent_type,
+    │       _pending_count=3, _required_agents=[...]
+    │
+    ├─→ _current_session_id.set(session_id)  ← 设置 contextvar
+    │
+    ├─→ bind_infrastructure() → 所有 Agent
+    │     每个 Agent 绑定: RuntimeProxy, MessageBusProxy, private_memory
+    │     (proxy 通过 contextvar 自动路由到当前 session 的 runtime)
+    │
+    ├─→ _execute_full_review_chain()
+    │     │
+    │     ├─ Step 1: DocumentParserAgent
+    │     │   read_shared("contract_text", CONTEXT)
+    │     │   → LLM 解析 → write_shared("document_parser", ANALYSIS)
+    │     │   → publish_event("document.parsed")
+    │     │
+    │     ├─ Step 2: 并行启动 3 个分析 Agent
+    │     │   │
+    │     │   ├─ RiskAssessmentAgent
+    │     │   │   read_shared("contract_text", CONTEXT)
+    │     │   │   → LLM 分析 → write_shared("risk_assessor", ANALYSIS)
+    │     │   │   → _private_memory.set_cache("last_result", result)
+    │     │   │   → decrement_pending_count() → 2
+    │     │   │
+    │     │   ├─ ClauseAnalysisAgent
+    │     │   │   → write_shared("clause_analyst", ANALYSIS)
+    │     │   │   → _private_memory.set_cache("last_result", result)
+    │     │   │   → decrement_pending_count() → 1
+    │     │   │
+    │     │   └─ ComplianceCheckerAgent
+    │     │       → write_shared("compliance_checker", ANALYSIS)
+    │     │       → _private_memory.set_cache("last_result", result)
+    │     │       → decrement_pending_count() → 0 ← 触发回调!
+    │     │
+    │     ├─→ _analysis_complete_event.set()  (聚合屏障归零)
+    │     │
+    │     └─ Step 3: ReportGeneratorAgent (被回调自动触发)
+    │         read_shared("document_parser/risk_assessor/clause_analyst/compliance_checker", ANALYSIS)
+    │         → write_shared("report_generator", DECISION)
+    │         → publish_event("task.completed")
+    │
+    └─→ 收集结果 → 格式化回复
+```
+
+### 6.2 增量修改流程
+
+```
+用户: "把第三条的违约金从5%改成3%"
+    │
+    ▼
+MultiTurnHandler.handle_message()
+    │
+    ├─→ IntentRecognizer: "modify_contract"
+    │
+    ├─→ _init_infrastructure() + 存储 user_message
+    │
+    ├─→ _execute_incremental_modify()
+    │     │
+    │     ├─ Step 1: _parse_modify_instruction()
+    │     │   LLM Function Calling → ModifyInstruction
+    │     │   {action: "replace", locate_type: "clause_number",
+    │     │    locate_value: "第三条", old_content: "5%",
+    │     │    new_content: "3%", confidence: 0.9}
+    │     │
+    │     ├─ Step 2: DocumentParserAgent
+    │     │   read_shared("modify_instruction", ANALYSIS)
+    │     │   → _locate_clause() 双重匹配定位
+    │     │   → _replace_clause() 替换文本
+    │     │   → write_shared("document_parser", ANALYSIS) 更新
+    │     │   → write_shared("updated_clause", ANALYSIS) 通知下游
+    │     │   → publish_event("clause.updated")
+    │     │
+    │     └─ Step 3: 并行增量分析
+    │         │
+    │         ├─ RiskAssessmentAgent
+    │         │   检测到 modify_contract 意图
+    │         │   → _private_memory.get_cache("last_result") 读缓存
+    │         │   → _incremental_analyze() 只分析第三条
+    │         │   → _merge_incremental_result() 合并到缓存
+    │         │
+    │         ├─ ClauseAnalysisAgent (同上)
+    │         │
+    │         └─ ComplianceCheckerAgent (同上)
+    │
+    └─→ 收集增量结果 → 格式化回复
+```
+
+### 6.3 追问流程
+
+```
+用户: "第二条建议什么意思？"
+    │
+    ▼
+IntentRecognizer: "question_answer"
+    │
+    ▼
+_answer_from_context()
+    context = 合同内容(_shared_data["contract_text"])
+            + 对话历史(_messages)
+    → LLM 生成回答
 ```
 
 ---
 
-## 七、关键代码文件索引
+## 七、架构修复记录
+
+### 7.1 SharedMemory 生命周期问题
+
+**问题**：每次请求创建新的 SharedMemoryManager，请求结束后 `_runtimes.pop()` 销毁。跨请求的中间数据（如 `updated_clause`、`modify_instruction`）丢失。
+
+**修复**：移除 `_runtimes.pop()`，runtime 保留在 `_runtimes` 字典中，下次同 session 请求可复用。
+
+```python
+# 修复前（每次请求销毁）
+self._runtimes.pop(session_id, None)
+
+# 修复后（runtime 保留）
+_current_session_id.reset(token)  # 只释放 contextvar，runtime 保留
+```
+
+### 7.2 Agent Singleton 并发绑定问题
+
+**问题**：`bind_infrastructure()` 直接修改 singleton Agent 的 `self._shared_memory` 等实例属性。并发请求 B 会覆盖请求 A 的引用，导致数据错乱。
+
+**修复**：引入 `RuntimeProxy` 和 `MessageBusProxy` 代理类。Agent 绑定 proxy 而非具体实例，proxy 通过 `contextvars.ContextVar` 在每次 `read`/`write` 时自动解析到当前 session 的 runtime。
+
+```python
+# RuntimeProxy 核心逻辑
+_current_session_id: contextvars.ContextVar[str] = ContextVar('current_session_id', default='default')
+
+class RuntimeProxy:
+    def _get_sm(self):
+        session_id = _current_session_id.get()       # 从 contextvar 获取当前 session
+        runtime = self._get_runtime(session_id)      # 从 _runtimes 字典查找
+        return runtime.shared_memory if runtime else None
+
+    def read(self, agent_id, key, layer):
+        sm = self._get_sm()
+        return sm.read(agent_id, key, layer) if sm else None
+
+    def write(self, agent_id, key, value, layer, validate=True):
+        sm = self._get_sm()
+        return sm.write(agent_id, key, value, layer, validate=validate) if sm else 0
+```
+
+**请求隔离流程**：
+```
+请求 A (session=abc)
+    │
+    ├─ token_a = _current_session_id.set("abc")
+    │   Agent.read_shared() → proxy._get_sm() → _runtimes["abc"].shared_memory
+    │
+    └─ _current_session_id.reset(token_a)
+
+请求 B (session=def)  ← 与 A 并发
+    │
+    ├─ token_b = _current_session_id.set("def")
+    │   Agent.read_shared() → proxy._get_sm() → _runtimes["def"].shared_memory
+    │
+    └─ _current_session_id.reset(token_b)
+```
+
+### 7.3 AgentPrivateMemory 初始化时机
+
+**问题**：`bind_infrastructure()` 每次调用都创建新的 `AgentPrivateMemory`，新请求覆盖旧的缓存引用。
+
+**修复**：只在第一次绑定时创建，后续请求复用同一个 `_private_memory` 实例（singleton Agent 跨请求共享缓存）。
+
+```python
+# 修复前（每次覆盖）
+self._private_memory = AgentPrivateMemory(self.agent_id)
+
+# 修复后（只创建一次）
+if self._private_memory is None:
+    self._private_memory = AgentPrivateMemory(self.agent_id)
+```
+
+---
+
+## 八、关键代码文件索引
 
 | 文件 | 职责 |
 |------|------|
 | `src/agents/conversation_context.py` | 对话上下文管理（消息、轮次、Agent结果、共享数据） |
-| `src/agents/multi_turn_handler.py` | 多轮对话处理（意图识别→Agent执行→结果存储→追问回答） |
-| `src/agents/intent_recognizer.py` | 意图识别（LLM Function Calling） |
+| `src/agents/multi_turn_handler.py` | 多轮对话处理（意图识别→Agent执行→结果存储→追问回答→增量修改调度） |
+| `src/agents/intent_recognizer.py` | 意图识别（LLM Function Calling，支持 9 种意图） |
+| `src/agents/base_agent.py` | Agent 基类（共享内存绑定、聚合屏障、事件发布） |
+| `src/agents/shared_data_schemas.py` | Agent 间数据 Schema（Pydantic 校验，含 ModifyInstruction） |
+| `src/agents/business_events.py` | 业务事件常量（7 种事件类型） |
+| `src/agents/document_parser_agent.py` | 文档解析 + 增量修改（条款定位、替换、插入） |
+| `src/agents/risk_assessment_agent.py` | 风险评估 + 增量分析（缓存复用、结果合并） |
+| `src/agents/clause_analysis_agent.py` | 条款分析 + 增量分析 |
+| `src/agents/compliance_checker_agent.py` | 合规检查 + 增量分析 |
+| `src/agents/report_generator_agent.py` | 报告生成（聚合屏障触发） |
 | `src/memory/long_term_memory.py` | 长期记忆（Qdrant 向量存储） |
-| `src/memory/private_memory.py` | Agent私有记忆（已定义，未使用） |
-| `src/memory/shared_memory.py` | 共享记忆管理器（已定义，未使用） |
+| `src/memory/private_memory.py` | Agent 私有记忆（增量分析缓存） |
+| `src/memory/shared_memory.py` | 共享记忆管理器（事件驱动核心数据通道） |
 | `src/memory/memory_layer.py` | 记忆层次枚举（CONTEXT/ANALYSIS/DECISION） |
 | `src/api/task_manager.py` | 任务管理（调用handler + 保存长期记忆） |
 | `src/api/routes.py` | API路由（/review/stream, /memory/recall 等） |

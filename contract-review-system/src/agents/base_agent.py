@@ -105,16 +105,17 @@ class BaseAgent(ABC):
         绑定共享内存和消息总线（由调度器在启动时调用）
 
         Args:
-            shared_memory: SharedMemoryManager 实例
-            message_bus: MessageBus 实例
+            shared_memory: SharedMemoryManager 或 RuntimeProxy 实例
+            message_bus: MessageBus 或 MessageBusProxy 实例
             on_all_complete: 可选回调，聚合屏障归零时调用
         """
         self._shared_memory = shared_memory
         self._message_bus = message_bus
         self._on_all_analyses_complete = on_all_complete
-        # 初始化私有记忆
-        from src.memory.private_memory import AgentPrivateMemory
-        self._private_memory = AgentPrivateMemory(self.agent_id)
+        # 私有记忆只初始化一次（singleton Agent 跨请求共享缓存）
+        if self._private_memory is None:
+            from src.memory.private_memory import AgentPrivateMemory
+            self._private_memory = AgentPrivateMemory(self.agent_id)
 
     def read_shared(self, key: str, layer: MemoryLayer) -> Optional[Any]:
         """从共享内存读取数据"""

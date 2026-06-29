@@ -11,8 +11,10 @@
 - 异常兜底：超时熔断、Agent 失败降级
 """
 import asyncio
+import contextvars
 import logging
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
 
 from .base_agent import BaseAgent
 from .intent_recognizer import IntentRecognizer, IntentType, Intent
@@ -28,6 +30,83 @@ logger = logging.getLogger(__name__)
 # 全局超时：每个任务最大执行时长（秒）
 _TASK_TIMEOUT = 180
 
+# 会话级上下文变量（并发隔离：每个请求有独立的 session_id）
+_current_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    'current_session_id', default='default'
+)
+
+
+@dataclass
+class TaskRuntime:
+    """单次请求的运行时上下文（解决并发隔离问题）"""
+    session_id: str
+    shared_memory: SharedMemoryManager
+    message_bus: MessageBus
+    completion_event: asyncio.Event
+    analysis_complete_event: asyncio.Event
+
+
+class RuntimeProxy:
+    """
+    运行时代理 - 解决 Agent Singleton 绑定问题
+
+    Agent 的 bind_infrastructure() 绑定此 proxy 而非具体 SharedMemoryManager。
+    proxy 在 read/write 时通过 contextvars 自动解析到当前 session 的 runtime，
+    实现请求级隔离，无需修改 Agent 的 process() 签名。
+    """
+
+    def __init__(self, get_runtime_fn: Callable[[str], Optional[TaskRuntime]]):
+        self._get_runtime = get_runtime_fn
+
+    def _get_sm(self) -> Optional[SharedMemoryManager]:
+        session_id = _current_session_id.get()
+        runtime = self._get_runtime(session_id)
+        return runtime.shared_memory if runtime else None
+
+    def read(self, agent_id: str, key: str, layer: MemoryLayer) -> Optional[Any]:
+        sm = self._get_sm()
+        return sm.read(agent_id, key, layer) if sm else None
+
+    def write(self, agent_id: str, key: str, value: Any, layer: MemoryLayer, validate: bool = True) -> int:
+        sm = self._get_sm()
+        return sm.write(agent_id, key, value, layer, validate=validate) if sm else 0
+
+    def get_all_keys(self, layer: MemoryLayer) -> List[str]:
+        sm = self._get_sm()
+        return sm.get_all_keys(layer) if sm else []
+
+    def subscribe(self, key: str, callback: Callable):
+        sm = self._get_sm()
+        if sm:
+            sm.subscribe(key, callback)
+
+    def unsubscribe(self, key: str, callback: Callable):
+        sm = self._get_sm()
+        if sm:
+            sm.unsubscribe(key, callback)
+
+
+class MessageBusProxy:
+    """
+    消息总线代理 - 同 RuntimeProxy 原理
+
+    Agent 的 bind_infrastructure() 绑定此 proxy 而非具体 MessageBus。
+    """
+
+    def __init__(self, get_runtime_fn: Callable[[str], Optional[TaskRuntime]]):
+        self._get_runtime = get_runtime_fn
+
+    def _get_bus(self) -> Optional[MessageBus]:
+        session_id = _current_session_id.get()
+        runtime = self._get_runtime(session_id)
+        return runtime.message_bus if runtime else None
+
+    def publish(self, message):
+        bus = self._get_bus()
+        if bus:
+            bus.publish(message)
+
+
 # 意图到所需 Agent 的映射
 INTENT_REQUIRED_AGENTS = {
     IntentType.CONTRACT_REVIEW: ["document_parser", "risk_assessor", "clause_analyst", "compliance_checker", "report_generator"],
@@ -35,6 +114,7 @@ INTENT_REQUIRED_AGENTS = {
     IntentType.CLAUSE_ANALYSIS: ["clause_analyst"],
     IntentType.COMPLIANCE_CHECK: ["compliance_checker"],
     IntentType.REPORT_GENERATION: ["report_generator"],
+    IntentType.MODIFY_CONTRACT: ["document_parser", "risk_assessor", "clause_analyst", "compliance_checker"],
 }
 
 
@@ -58,11 +138,13 @@ class MultiTurnHandler:
         self.conversation_manager = conversation_manager or ConversationManager()
         self._agents: Dict[str, BaseAgent] = {}
 
-        # 阶段1：事件驱动基础设施
-        self._shared_memory: Optional[SharedMemoryManager] = None
-        self._message_bus: Optional[MessageBus] = None
-        self._completion_event: Optional[asyncio.Event] = None
-        self._analysis_complete_event: Optional[asyncio.Event] = None
+        # 会话级运行时（解决并发隔离问题）
+        self._runtimes: Dict[str, TaskRuntime] = {}
+
+        # RuntimeProxy / MessageBusProxy：Agent 绑定 proxy 而非具体实例
+        # proxy 通过 contextvars 在 read/write 时自动解析到当前 session 的 runtime
+        self._sm_proxy = RuntimeProxy(lambda sid: self._runtimes.get(sid))
+        self._bus_proxy = MessageBusProxy(lambda sid: self._runtimes.get(sid))
 
         logger.info("多轮对话处理器初始化（弱中心化模式）")
 
@@ -121,7 +203,22 @@ class MultiTurnHandler:
         # 7. 处理问候、未知意图和问题回答（不需要Agent）
         if intent.type in (IntentType.GREETING, IntentType.QUESTION_ANSWER, IntentType.UNKNOWN):
             if intent.type == IntentType.QUESTION_ANSWER:
-                response = await self._answer_from_context(user_message, ctx)
+                # 优先从 SharedMemory CONTEXT 读取修改后的 contract_text
+                effective_contract = contract_text or ctx.get_contract_text() or ""
+                # 检查是否有已存在的 runtime（之前修改过合同）
+                existing_runtime = self._runtimes.get(session_id)
+                if existing_runtime:
+                    sm_contract = existing_runtime.shared_memory.read(
+                        "coordinator", "contract_text", MemoryLayer.CONTEXT
+                    )
+                    if sm_contract:
+                        effective_contract = sm_contract
+                        logger.info(f"追问: 从 SharedMemory 读取修改后的合同文本（{len(sm_contract)}字）")
+                    else:
+                        logger.warning(f"追问: SharedMemory 中无 contract_text")
+                else:
+                    logger.warning(f"追问: 未找到已有 runtime, session={session_id}")
+                response = await self._answer_from_context(user_message, ctx, effective_contract)
             else:
                 response = self._get_direct_response(intent.type)
             ctx.add_assistant_message(response)
@@ -139,6 +236,7 @@ class MultiTurnHandler:
         requires_contract = intent.type in (
             IntentType.CONTRACT_REVIEW, IntentType.RISK_ASSESSMENT,
             IntentType.CLAUSE_ANALYSIS, IntentType.COMPLIANCE_CHECK,
+            IntentType.MODIFY_CONTRACT,
         )
         if requires_contract and not contract_text and not ctx.get_contract_text():
             response = "请先上传或提供合同文本，然后我再帮您进行分析。"
@@ -152,28 +250,37 @@ class MultiTurnHandler:
                 "needs_contract": True,
             }
 
-        # 9. 初始化事件驱动基础设施
+        # 9. 初始化事件驱动基础设施（每次请求独立运行时）
         effective_contract = contract_text or ctx.get_contract_text() or ""
-        self._init_infrastructure(session_id, effective_contract, intent, file_info)
+        runtime = self._init_runtime(session_id, effective_contract, intent, file_info)
 
-        # 10. 绑定基础设施到所有 Agent（传入聚合屏障回调）
+        # 9.1 设置 session 上下文变量（proxy 通过此变量路由到正确的 runtime）
+        token = _current_session_id.set(session_id)
+
+        # 9.2 存储用户原始消息（供修改指令解析使用）
+        runtime.shared_memory.write("coordinator", "user_message", user_message, MemoryLayer.CONTEXT, validate=False)
+
+        # 10. 绑定 proxy 到所有 Agent（而非具体 SharedMemoryManager，解决 singleton 并发问题）
         for agent in self._agents.values():
             agent.bind_infrastructure(
-                self._shared_memory,
-                self._message_bus,
-                on_all_complete=self._on_all_analyses_complete,
+                self._sm_proxy,
+                self._bus_proxy,
+                on_all_complete=self._make_on_complete_callback(runtime),
             )
 
         # 11. 执行事件驱动的 Agent 协作链
-        result = await self._execute_event_driven(intent.type, session_id)
+        result = await self._execute_event_driven(runtime, intent.type)
 
         # 12. 从共享内存收集结果，存入上下文
-        all_results = self._collect_results()
+        all_results = self._collect_results(runtime)
         for agent_name, agent_result in all_results.items():
             ctx.set_agent_result(agent_name, agent_result)
 
         # 13. 生成回复
         response = self._format_response(intent.type, all_results, ctx)
+
+        # 14. 释放 session 上下文（runtime 保留在 _runtimes 中，供下次请求复用）
+        _current_session_id.reset(token)
         ctx.add_assistant_message(response)
 
         return {
@@ -187,66 +294,104 @@ class MultiTurnHandler:
 
     # ==================== 事件驱动执行 ====================
 
-    def _on_all_analyses_complete(self):
-        """聚合屏障回调：所有分析 Agent 完成后由最后一个 Agent 调用"""
-        logger.info("聚合屏障归零：所有分析 Agent 已完成")
-        if self._analysis_complete_event:
-            self._analysis_complete_event.set()
+    def _make_on_complete_callback(self, runtime: TaskRuntime):
+        """创建聚合屏障回调闭包，捕获当前运行时"""
+        def callback():
+            logger.info("聚合屏障归零：所有分析 Agent 已完成")
+            # 设置分析完成事件
+            runtime.analysis_complete_event.set()
+            # 全量审查场景：自动触发 ReportGenerator
+            if "report_generator" in INTENT_REQUIRED_AGENTS.get(
+                IntentType(runtime.shared_memory.read("coordinator", "intent_type", MemoryLayer.CONTEXT) or ""),
+                [],
+            ):
+                asyncio.create_task(self._trigger_report_generator(runtime))
+        return callback
 
-    def _init_infrastructure(
+    async def _trigger_report_generator(self, runtime: TaskRuntime):
+        """聚合屏障归零后自动触发 ReportGenerator"""
+        logger.info("触发 ReportGenerator 生成报告")
+        task = {"session_id": runtime.session_id}
+        try:
+            await self._execute_single_agent("report_generator", task)
+        except Exception as e:
+            logger.error(f"ReportGenerator 执行失败: {e}")
+        finally:
+            runtime.completion_event.set()
+
+    def _init_runtime(
         self,
         session_id: str,
         contract_text: str,
         intent: Intent,
         file_info: Optional[Dict[str, Any]] = None,
-    ):
-        """初始化共享内存和消息总线，写入 CONTEXT 层原始数据"""
-        # 创建本次会话的共享内存
-        self._shared_memory = SharedMemoryManager(contract_id=session_id)
-        self._message_bus = MessageBus()
-        self._completion_event = asyncio.Event()
-        self._analysis_complete_event = asyncio.Event()
+    ) -> TaskRuntime:
+        """
+        初始化单次请求的运行时上下文
 
-        # 写入 CONTEXT 层（原始输入，写入一次后只读）
+        同一 session 复用已有的 SharedMemoryManager（保留之前的 ANALYSIS 数据），
+        这样增量修改可以读到之前的解析结果。
+        """
+        # 复用已有 runtime（保留 ANALYSIS 数据，实现增量修改）
+        existing_runtime = self._runtimes.get(session_id)
+        if existing_runtime:
+            shared_memory = existing_runtime.shared_memory
+            logger.info(f"复用已有 runtime: session={session_id}，保留 ANALYSIS 数据")
+        else:
+            shared_memory = SharedMemoryManager(contract_id=session_id)
+
+        message_bus = MessageBus()
+        completion_event = asyncio.Event()
+        analysis_complete_event = asyncio.Event()
+
+        # 更新 CONTEXT 层（意图类型每次请求可能不同）
         contract_type = "general"
         if file_info:
             contract_type = file_info.get("contract_type", "general")
 
-        self._shared_memory.write("coordinator", "contract_text", contract_text, MemoryLayer.CONTEXT)
-        self._shared_memory.write("coordinator", "contract_type", contract_type, MemoryLayer.CONTEXT)
-        self._shared_memory.write("coordinator", "intent_type", intent.type.value, MemoryLayer.CONTEXT)
-        self._shared_memory.write("coordinator", "session_id", session_id, MemoryLayer.CONTEXT)
+        shared_memory.write("coordinator", "contract_text", contract_text, MemoryLayer.CONTEXT)
+        shared_memory.write("coordinator", "contract_type", contract_type, MemoryLayer.CONTEXT)
+        shared_memory.write("coordinator", "intent_type", intent.type.value, MemoryLayer.CONTEXT)
+        shared_memory.write("coordinator", "session_id", session_id, MemoryLayer.CONTEXT)
 
-        # 聚合栅栏：待完成分析 Agent 计数器
+        # 聚合栅栏：仅全量审查场景初始化 _pending_count
         required = INTENT_REQUIRED_AGENTS.get(intent.type, [])
-        analysis_agents = [a for a in ["risk_assessor", "clause_analyst", "compliance_checker"] if a in required]
-        self._shared_memory.write(
-            "coordinator", "_pending_count", len(analysis_agents), MemoryLayer.CONTEXT,
-            validate=False,  # 内部字段，跳过 Schema 校验
+        if intent.type == IntentType.CONTRACT_REVIEW:
+            analysis_agents = [a for a in ["risk_assessor", "clause_analyst", "compliance_checker"] if a in required]
+            shared_memory.write(
+                "coordinator", "_pending_count", len(analysis_agents), MemoryLayer.CONTEXT,
+                validate=False,
+            )
+        else:
+            # 增量修改/单 Agent 场景：不初始化聚合栅栏，避免误触发
+            shared_memory.write("coordinator", "_pending_count", 0, MemoryLayer.CONTEXT, validate=False)
+
+        shared_memory.write("coordinator", "_required_agents", required, MemoryLayer.CONTEXT, validate=False)
+
+        runtime = TaskRuntime(
+            session_id=session_id,
+            shared_memory=shared_memory,
+            message_bus=message_bus,
+            completion_event=completion_event,
+            analysis_complete_event=analysis_complete_event,
         )
-        self._shared_memory.write(
-            "coordinator", "_required_agents", required, MemoryLayer.CONTEXT,
-            validate=False,
-        )
+        self._runtimes[session_id] = runtime
 
         logger.info(
-            f"共享内存初始化完成: session={session_id}, "
-            f"pending_analyses={len(analysis_agents)}, required={required}"
+            f"运行时初始化完成: session={session_id}, "
+            f"intent={intent.type.value}, required={required}"
         )
+        return runtime
 
-    async def _execute_event_driven(self, intent_type: IntentType, session_id: str) -> Dict[str, Any]:
+    async def _execute_event_driven(self, runtime: TaskRuntime, intent_type: IntentType) -> Dict[str, Any]:
         """
         执行事件驱动的 Agent 协作链（带全局超时熔断）
-
-        根据意图类型选择不同的执行路径：
-        - CONTRACT_REVIEW: 完整链路（聚合栅栏驱动）
-        - 单 Agent 意图: 按需执行
         """
-        task = {"session_id": session_id}
+        task = {"session_id": runtime.session_id}
 
         try:
             result = await asyncio.wait_for(
-                self._execute_by_intent(intent_type, task),
+                self._execute_by_intent(runtime, intent_type, task),
                 timeout=_TASK_TIMEOUT,
             )
             return result
@@ -258,10 +403,13 @@ class MultiTurnHandler:
             logger.error(f"事件驱动执行失败: {e}", exc_info=True)
             return {"error": str(e), "status": "error"}
 
-    async def _execute_by_intent(self, intent_type: IntentType, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_by_intent(self, runtime: TaskRuntime, intent_type: IntentType, task: Dict[str, Any]) -> Dict[str, Any]:
         """根据意图类型分发执行"""
         if intent_type == IntentType.CONTRACT_REVIEW:
-            return await self._execute_full_review_chain(task)
+            return await self._execute_full_review_chain(runtime, task)
+
+        elif intent_type == IntentType.MODIFY_CONTRACT:
+            return await self._execute_incremental_modify(runtime, task)
 
         elif intent_type in (IntentType.RISK_ASSESSMENT, IntentType.CLAUSE_ANALYSIS,
                              IntentType.COMPLIANCE_CHECK, IntentType.REPORT_GENERATION):
@@ -273,38 +421,36 @@ class MultiTurnHandler:
             }
             agent_name = agent_map[intent_type]
             result = await self._execute_single_agent(agent_name, task)
-            # 单 Agent 场景：设置所有事件（分析完成 + 任务完成）
-            self._analysis_complete_event.set()
-            self._completion_event.set()
+            # 单 Agent 场景：直接设置完成事件（不需要聚合栅栏）
+            runtime.completion_event.set()
             return result
 
         else:
             logger.warning(f"未知意图类型: {intent_type}")
             return {}
 
-    async def _execute_full_review_chain(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_full_review_chain(self, runtime: TaskRuntime, task: Dict[str, Any]) -> Dict[str, Any]:
         """
         完整审查链路（聚合栅栏驱动）
 
         链路：
-        1. DocumentParser 执行 → 发布 document.parsed
-        2. Risk + Clause + Compliance 并行执行（按需，只执行 required_agents 中的）
-        3. 聚合栅栏：每个分析 Agent 完成后计数器 -1，归零时触发 ReportGenerator
-        4. 等待 task.completed 事件
+        1. DocumentParser 执行
+        2. Risk + Clause + Compliance 并行执行
+        3. 聚合栅栏归零 → 回调自动触发 ReportGenerator
+        4. 等待 ReportGenerator 完成
         """
-        required = self._shared_memory.read("coordinator", "_required_agents", MemoryLayer.CONTEXT) or []
+        required = runtime.shared_memory.read("coordinator", "_required_agents", MemoryLayer.CONTEXT) or []
 
-        # Step 1: 文档解析（如果在 required 列表中）
+        # Step 1: 文档解析
         if "document_parser" in required:
             logger.info("Step 1: 文档解析")
             parse_result = await self._execute_single_agent("document_parser", task)
             if isinstance(parse_result, dict) and "error" in parse_result:
                 logger.warning(f"文档解析失败，跳过后续步骤: {parse_result}")
-                self._completion_event.set()
+                runtime.completion_event.set()
                 return parse_result
 
-        # Step 2: 按需并行执行分析 Agent（只执行 required 列表中的）
-        # Agent 完成后会递减 _pending_count，归零时设置 _analysis_complete_event
+        # Step 2: 并行执行分析 Agent（完成后通过聚合栅栏自动触发 ReportGenerator）
         analysis_tasks = []
         analysis_names = []
         for agent_name in ["risk_assessor", "clause_analyst", "compliance_checker"]:
@@ -313,22 +459,21 @@ class MultiTurnHandler:
                 analysis_names.append(agent_name)
 
         if analysis_tasks:
-            logger.info(f"Step 2: 并行执行 {analysis_names}（等待聚合屏障归零）")
+            logger.info(f"Step 2: 并行执行 {analysis_names}（等待聚合屏障归零 → 触发 ReportGenerator）")
 
-            # 启动所有分析 Agent，但不等待完成
-            # Agent 完成后会通过 decrement_pending_count() 递减计数器
-            gather_task = asyncio.create_task(
-                asyncio.gather(*analysis_tasks, return_exceptions=True)
-            )
+            async def _run_analysis():
+                return await asyncio.gather(*analysis_tasks, return_exceptions=True)
 
-            # 等待聚合屏障归零（所有分析 Agent 完成）
+            gather_task = asyncio.create_task(_run_analysis())
+
+            # 等待 ReportGenerator 完成（聚合栅栏归零 → 回调触发 ReportGenerator → 完成后 set completion_event）
             try:
                 await asyncio.wait_for(
-                    self._analysis_complete_event.wait(),
+                    runtime.completion_event.wait(),
                     timeout=_TASK_TIMEOUT,
                 )
             except asyncio.TimeoutError:
-                logger.error(f"聚合屏障等待超时（{_TASK_TIMEOUT}s）")
+                logger.error(f"审查链路等待超时（{_TASK_TIMEOUT}s）")
                 gather_task.cancel()
 
             # 处理异常（降级）
@@ -337,37 +482,130 @@ class MultiTurnHandler:
                 for agent_name, result in zip(analysis_names, analysis_results):
                     if isinstance(result, Exception):
                         logger.error(f"Agent {agent_name} 执行异常: {result}，标记为失败")
-                        self._shared_memory.write(
-                            "coordinator", f"{agent_name}_status", "failed", MemoryLayer.ANALYSIS,
-                            validate=False,
-                        )
-
-        # Step 3: ReportGenerator 已被最后一个分析 Agent 自动触发
-        # 等待 ReportGenerator 完成（通过 _completion_event）
-        if "report_generator" in required:
-            logger.info("Step 3: 等待 ReportGenerator 完成")
-            try:
-                await asyncio.wait_for(
-                    self._completion_event.wait(),
-                    timeout=_TASK_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"ReportGenerator 等待超时（{_TASK_TIMEOUT}s）")
 
         # 汇总所有结果
-        all_results = self._collect_results()
+        all_results = self._collect_results(runtime)
         if "document_parser" in required:
             all_results["document_parser"] = parse_result
 
         return all_results
+
+    async def _execute_incremental_modify(self, runtime: TaskRuntime, task: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        增量修改流程（不使用聚合栅栏，直接 await 所有分析任务）
+
+        1. LLM 解析修改指令
+        2. DocumentParser 定位并替换条款
+        3. 各分析 Agent 单条款增量分析
+        """
+        # Step 1: LLM 解析修改指令
+        user_message = runtime.shared_memory.read("coordinator", "user_message", MemoryLayer.CONTEXT) or ""
+        instruction = await self._parse_modify_instruction(user_message)
+
+        if not instruction:
+            return {"error": "无法理解修改意图，请更具体地描述"}
+
+        confidence = instruction.get("confidence", 0)
+        if confidence < 0.5:
+            return {"error": f"修改意图不够明确（置信度 {confidence:.0%}），请更具体地描述，例如'把第三条的违约金从5%改成3%'"}
+
+        runtime.shared_memory.write(
+            "coordinator", "modify_instruction", instruction, MemoryLayer.ANALYSIS,
+            validate=False,
+        )
+        logger.info(f"修改指令解析: {instruction}")
+
+        # Step 2: DocumentParser 定位并替换条款
+        parse_result = await self._execute_single_agent("document_parser", task)
+        if isinstance(parse_result, dict) and "error" in parse_result:
+            logger.warning(f"条款定位失败: {parse_result}")
+            return parse_result
+
+        # Step 3: 单条款增量分析（直接 await，不走聚合栅栏）
+        analysis_tasks = []
+        analysis_names = []
+        for agent_name in ["risk_assessor", "clause_analyst", "compliance_checker"]:
+            if agent_name in self._agents:
+                analysis_tasks.append(self._execute_single_agent(agent_name, task))
+                analysis_names.append(agent_name)
+
+        if analysis_tasks:
+            logger.info(f"增量分析: {analysis_names}")
+            await asyncio.gather(*analysis_tasks, return_exceptions=True)
+
+        # 汇总结果
+        all_results = self._collect_results(runtime)
+        all_results["document_parser"] = parse_result
+        return all_results
+
+    async def _parse_modify_instruction(self, user_message: str) -> Optional[Dict[str, Any]]:
+        """
+        使用 LLM 从用户消息中提取修改指令
+
+        Args:
+            user_message: 用户原始消息
+
+        Returns:
+            修改指令字典，解析失败返回 None
+        """
+        if not user_message:
+            return None
+
+        try:
+            from langchain_core.messages import HumanMessage, SystemMessage
+            from src.agents.shared_data_schemas import ModifyInstruction
+
+            system_prompt = """你是一个合同修改指令解析器。从用户输入中提取修改指令。
+
+输出格式要求（必须是严格有效的JSON）：
+{
+  "action": "replace/delete/insert",
+  "locate_type": "clause_number/clause_title/semantic",
+  "locate_value": "第三条/违约责任/关于付款的条款",
+  "old_content": "被替换的原文（replace时必填）",
+  "new_content": "新内容（replace/insert时必填）",
+  "target_scope": "single_clause",
+  "confidence": 0.8
+}
+
+规则：
+1. locate_value 用用户原文中的表述
+2. 如果用户说"第三条"，locate_type="clause_number"，locate_value="第三条"
+3. 如果用户说"违约责任那条"，locate_type="clause_title"，locate_value="违约责任"
+4. 如果用户说"关于付款的条款"，locate_type="semantic"，locate_value="关于付款的条款"
+5. confidence 根据表述清晰度打分（0.5-1.0）
+6. replace 时尽量提取 old_content（用户说的原文片段）
+7. "加上"、"添加"、"增加"、"补充"、"加入" → action="insert"
+8. insert 时 locate_value 描述要添加的条款类型（如"责任限制"），new_content 包含用户要求的具体内容
+9. 只输出JSON"""
+
+            llm = get_llm()
+            structured_llm = llm.with_structured_output(ModifyInstruction)
+
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"用户修改指令：{user_message}"),
+            ]
+
+            result = await structured_llm.ainvoke(messages)
+
+            if isinstance(result, ModifyInstruction):
+                return result.model_dump()
+            elif isinstance(result, dict):
+                return result
+
+        except Exception as e:
+            logger.error(f"修改指令解析失败: {e}")
+
+        return None
 
     async def _execute_single_agent(self, agent_name: str, task: Dict[str, Any]) -> Dict[str, Any]:
         """
         执行单个 Agent（全链路容错）
 
         容错设计：
-        - 无论成功失败，都必须完成状态重置
         - Agent 异常不向上抛出，降级为错误结果
+        - 状态管理（set_running）和计数器（decrement_pending_count）由 Agent.process() 自行负责
         """
         if agent_name not in self._agents:
             logger.warning(f"Agent 未注册: {agent_name}")
@@ -375,7 +613,6 @@ class MultiTurnHandler:
 
         agent = self._agents[agent_name]
         try:
-            agent.set_running(True)
             logger.info(f"开始执行 Agent: {agent_name}")
             result = await agent.process(task)
             logger.info(f"Agent 执行完成: {agent_name}")
@@ -384,25 +621,17 @@ class MultiTurnHandler:
             logger.error(f"Agent 执行失败: {agent_name} - {e}", exc_info=True)
             # 降级：返回错误结果，不中断链路
             return {"status": "error", "agent": agent_name, "error": str(e)}
-        finally:
-            agent.set_running(False)
 
-    def _collect_results(self) -> Dict[str, Any]:
-        """从共享内存收集所有 ANALYSIS 层结果"""
-        if self._shared_memory is None:
-            return {}
-
+    def _collect_results(self, runtime: TaskRuntime) -> Dict[str, Any]:
+        """从运行时共享内存收集所有 ANALYSIS + DECISION 层结果"""
         results = {}
-        analysis_keys = self._shared_memory.get_all_keys(MemoryLayer.ANALYSIS)
-        for key in analysis_keys:
-            value = self._shared_memory.read("collector", key, MemoryLayer.ANALYSIS)
+        for key in runtime.shared_memory.get_all_keys(MemoryLayer.ANALYSIS):
+            value = runtime.shared_memory.read("collector", key, MemoryLayer.ANALYSIS)
             if value is not None:
                 results[key] = value
 
-        # 也收集 DECISION 层
-        decision_keys = self._shared_memory.get_all_keys(MemoryLayer.DECISION)
-        for key in decision_keys:
-            value = self._shared_memory.read("collector", key, MemoryLayer.DECISION)
+        for key in runtime.shared_memory.get_all_keys(MemoryLayer.DECISION):
+            value = runtime.shared_memory.read("collector", key, MemoryLayer.DECISION)
             if value is not None:
                 results[key] = value
 
@@ -429,7 +658,12 @@ class MultiTurnHandler:
             "- 问我关于合同的问题"
         )
 
-    async def _answer_from_context(self, user_message: str, ctx: ConversationContext) -> str:
+    async def _answer_from_context(
+        self,
+        user_message: str,
+        ctx: ConversationContext,
+        contract_text_override: Optional[str] = None,
+    ) -> str:
         """基于上下文回答用户问题（使用LLM理解对话历史）"""
         logger.info(f"追问处理: message={user_message[:50]}, session={ctx.session_id}")
 
@@ -440,10 +674,13 @@ class MultiTurnHandler:
 
         context_parts = []
 
-        contract_text = ctx.get_contract_text()
+        # 优先使用修改后的 contract_text，否则从 ConversationContext 读取
+        contract_text = contract_text_override or ctx.get_contract_text()
         if contract_text:
-            context_parts.append(f"=== 合同内容 ===\n{contract_text[:3000]}")
-            logger.info(f"合同内容: {len(contract_text)}字")
+            # 截断到合理长度（约 4000 token），避免丢失后部条款
+            truncated = contract_text[:15000] if len(contract_text) > 15000 else contract_text
+            context_parts.append(f"=== 合同内容 ===\n{truncated}")
+            logger.info(f"合同内容: {len(contract_text)}字（发送{len(truncated)}字）")
         else:
             logger.warning("未找到合同内容")
 
@@ -462,10 +699,12 @@ class MultiTurnHandler:
                 SystemMessage(content="""你是一个合同审查助手。用户之前已经对合同进行了分析，现在在追问细节。
 
 规则：
-1. 根据提供的合同内容和对话历史回答用户问题
-2. 对话历史中助手的回复包含了之前的分析结果，直接引用即可
-3. 回答要简洁明了，直接回答问题
-4. 如果上下文中没有相关信息，如实告知"""),
+1. 仔细阅读合同全文内容，找到与用户问题相关的条款
+2. 对话历史中助手的回复包含了之前的分析结果，可直接引用
+3. 如果合同中有明确条款回答用户问题，必须引用具体条款内容
+4. 回答要简洁明了，直接回答问题
+5. 只有在合同全文中确实找不到相关信息时才说"未发现"
+6. 如果合同被修改过（如新增条款），修改后的内容在合同文本中可以找到"""),
                 HumanMessage(content=f"""{context_str}
 
 用户问题：{user_message}""")
@@ -478,6 +717,7 @@ class MultiTurnHandler:
                               if isinstance(block, dict) and block.get("type") == "text"]
                 content = "\n".join(text_parts) if text_parts else str(content)
             logger.info(f"LLM回答完成: {len(content)}字")
+            logger.info(f"LLM回答内容: {content[:300]}")
             return content
 
         except Exception as e:
@@ -532,6 +772,29 @@ class MultiTurnHandler:
             response += "\n如需进一步分析，请告诉我具体需求。"
             return response
 
+        if intent_type == IntentType.MODIFY_CONTRACT:
+            doc_result = results.get("document_parser", {})
+            risk_result = results.get("risk_assessor", {})
+            clause_id = doc_result.get("updated_clause_id", "未知") if isinstance(doc_result, dict) else "未知"
+            risk_level = risk_result.get("risk_level", "unknown") if isinstance(risk_result, dict) else "unknown"
+            level_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(risk_level, "⚪")
+
+            response = f"✏️ 条款修改完成\n\n"
+            response += f"已修改条款: {clause_id}\n"
+            response += f"修改后风险等级: {risk_level.upper()} {level_emoji}\n"
+
+            # 显示增量分析发现的问题
+            if isinstance(risk_result, dict):
+                risks = risk_result.get("risks", [])
+                if risks:
+                    response += f"\n修改后发现 {len(risks)} 个风险点:\n"
+                    for i, risk in enumerate(risks[:3], 1):
+                        emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(risk.get("severity"), "⚪")
+                        response += f"  {i}. {emoji} {risk.get('name', '无描述')}\n"
+
+            response += "\n如需进一步调整，请告诉我。"
+            return response
+
         if intent_type == IntentType.RISK_ASSESSMENT:
             risk_result = results.get("risk_assessor", {})
             if isinstance(risk_result, dict) and "risk_level" in risk_result:
@@ -540,9 +803,36 @@ class MultiTurnHandler:
                 level_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(risk_level, "⚪")
                 response = f"⚠️ 风险评估完成 {level_emoji}\n\n"
                 response += f"风险等级: {risk_level.upper()}\n\n"
+
+                # 风险列表（含描述和建议）
                 for i, risk in enumerate(risks, 1):
                     emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(risk.get("severity"), "⚪")
                     response += f"{i}. {emoji} {risk.get('name', '无描述')}\n"
+                    if risk.get("description"):
+                        response += f"   {risk['description']}\n"
+                    if risk.get("suggestion"):
+                        response += f"   💡 建议: {risk['suggestion']}\n"
+
+                # 风险量化
+                quant = risk_result.get("risk_quantification", {})
+                if quant:
+                    response += f"\n📊 风险评分: {quant.get('risk_score', 0)}/100\n"
+                    dist = quant.get("risk_distribution", {})
+                    if any(dist.values()):
+                        response += f"分布: 🔴高{dist.get('high', 0)} 🟡中{dist.get('medium', 0)} 🟢低{dist.get('low', 0)}\n"
+
+                # 缓解建议
+                mitigation = risk_result.get("mitigation_plan", [])
+                if mitigation:
+                    response += "\n🛡️ 缓解建议:\n"
+                    for m in mitigation[:5]:
+                        response += f"- {m.get('mitigation', '无')}\n"
+
+                # 整体评估
+                summary = risk_result.get("summary", {})
+                if summary.get("overall_assessment"):
+                    response += f"\n📝 {summary['overall_assessment']}\n"
+
                 response += "\n如需详细分析某个风险点，请告诉我。"
                 return response
 
@@ -620,6 +910,7 @@ class MultiTurnHandler:
             {"intent": "risk_assessment", "description": "风险评估", "requires_contract": True},
             {"intent": "clause_analysis", "description": "条款分析", "requires_contract": True},
             {"intent": "compliance_check", "description": "合规检查", "requires_contract": True},
+            {"intent": "modify_contract", "description": "修改合同条款", "requires_contract": True},
             {"intent": "report_generation", "description": "报告生成", "requires_contract": False},
             {"intent": "question_answer", "description": "问题回答", "requires_contract": False},
             {"intent": "greeting", "description": "问候", "requires_contract": False},

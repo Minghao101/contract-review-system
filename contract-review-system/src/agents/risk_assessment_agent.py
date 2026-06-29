@@ -43,6 +43,12 @@ class RiskAssessmentAgent(BaseAgent):
         )
         logger.info(f"风险评估Agent初始化完成: {name}")
 
+    def _get_cache_key(self) -> str:
+        """获取当前会话的缓存键（使用会话级 contextvar，跨请求稳定）"""
+        from .multi_turn_handler import _current_session_id
+        session_id = _current_session_id.get()
+        return f"{session_id}:last_result"
+
     async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """
         处理风险评估任务
@@ -57,24 +63,32 @@ class RiskAssessmentAgent(BaseAgent):
         Returns:
             风险评估结果
         """
-        # 优先从共享内存读取（事件驱动模式）
-        contract_text = self.read_shared("contract_text", MemoryLayer.CONTEXT) or ""
-        contract_type = self.read_shared("contract_type", MemoryLayer.CONTEXT) or "general"
-
-        # 兼容旧模式：从 task 参数读取
-        if not contract_text:
-            contract_text = task.get("contract_text", "")
-        if contract_type == "general":
-            contract_type = task.get("contract_type", "general")
-
-        if not contract_text:
-            return {"error": "合同文本为空"}
-
-        # 更新状态
         self.set_running(True)
         self.update_activity()
 
         try:
+            # 优先从共享内存读取（事件驱动模式）
+            contract_text = self.read_shared("contract_text", MemoryLayer.CONTEXT) or ""
+            contract_type = self.read_shared("contract_type", MemoryLayer.CONTEXT) or "general"
+
+            # 兼容旧模式：从 task 参数读取
+            if not contract_text:
+                contract_text = task.get("contract_text", "")
+            if contract_type == "general":
+                contract_type = task.get("contract_type", "general")
+
+            # 增量修改分支
+            intent_type = self.read_shared("intent_type", MemoryLayer.CONTEXT)
+            if intent_type == "modify_contract":
+                updated_clause = self.read_shared("updated_clause", MemoryLayer.ANALYSIS)
+                if updated_clause:
+                    cached = self._private_memory.get_cache(self._get_cache_key()) if self._private_memory else None
+                    if cached:
+                        return await self._incremental_analyze(updated_clause, cached, task)
+
+            if not contract_text:
+                return {"error": "合同文本为空"}
+
             logger.info(f"开始风险评估，文本长度: {len(contract_text)}")
 
             # LLM风险评估
@@ -90,8 +104,12 @@ class RiskAssessmentAgent(BaseAgent):
 
             logger.info(f"风险评估完成，风险等级: {result.get('risk_level', 'unknown')}")
 
+            # 缓存结果（供增量分析使用，按会话隔离）
+            if self._private_memory:
+                self._private_memory.set_cache(self._get_cache_key(), result)
+
             # 阶段1：写入共享内存 + 发布事件
-            self.write_shared("risk_result", result, MemoryLayer.ANALYSIS)
+            self.write_shared("risk_assessor", result, MemoryLayer.ANALYSIS, validate=False)
             self.publish_event(BusinessEvent.RISK_ANALYZED, {"session_id": task.get("session_id")})
             logger.info(f"已发布事件: {BusinessEvent.RISK_ANALYZED}")
 
@@ -100,7 +118,7 @@ class RiskAssessmentAgent(BaseAgent):
             logger.error(f"风险评估Agent异常: {e}", exc_info=True)
             # 异常时发布事件，写入错误状态，保证下游不会静默阻塞
             error_result = {"error": str(e), "risk_level": "unknown", "risks": []}
-            self.write_shared("risk_result", error_result, MemoryLayer.ANALYSIS)
+            self.write_shared("risk_assessor", error_result, MemoryLayer.ANALYSIS, validate=False)
             self.publish_event(BusinessEvent.RISK_ANALYZED, {"session_id": task.get("session_id")})
             return error_result
         finally:
@@ -321,3 +339,132 @@ class RiskAssessmentAgent(BaseAgent):
             return json.loads(fixed)
         except json.JSONDecodeError:
             return None
+
+    # ==================== 增量分析 ====================
+
+    async def _incremental_analyze(self, updated_clause: Dict[str, Any], previous_result: Dict[str, Any], task: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        单条款增量风险分析
+
+        Args:
+            updated_clause: 更新后的条款
+            previous_result: 上次的完整分析结果
+            task: 任务数据
+
+        Returns:
+            合并后的风险评估结果
+        """
+        clause_text = updated_clause.get("content", "")
+        clause_id = updated_clause.get("id", "")
+        action = updated_clause.get("action", "replace")
+
+        logger.info(f"增量风险分析: clause={clause_id}, action={action}")
+
+        if action == "deleted":
+            # 条款被删除：从结果中移除相关风险
+            merged = self._merge_incremental_result(previous_result, {"risks": [], "risk_level": previous_result.get("risk_level")}, clause_id)
+            # 重新计算量化指标
+            risks = merged.get("risks", [])
+            merged["risk_quantification"] = self.quantify_risk(risks)
+            merged["mitigation_plan"] = self.suggest_mitigation(risks)
+            self.write_shared("risk_assessor", merged, MemoryLayer.ANALYSIS, validate=False)
+            if self._private_memory:
+                self._private_memory.set_cache(self._get_cache_key(), merged)
+            return merged
+
+        system_prompt = f"""你是一个资深的合同风险评估专家。以下条款刚刚被修改，请只评估这个条款的风险。
+
+条款编号: {clause_id}
+条款内容: {clause_text}
+
+输出格式要求（必须是严格有效的JSON）：
+{{
+  "risks": [
+    {{
+      "name": "风险名称",
+      "severity": "high/medium/low",
+      "category": "liability/termination/payment/ip/confidentiality/dispute/other",
+      "description": "风险详细描述",
+      "impact": "可能的影响",
+      "suggestion": "具体的修改建议"
+    }}
+  ],
+  "risk_level": "low/medium/high/critical",
+  "summary": {{
+    "total_risks": 1,
+    "overall_assessment": "整体评估"
+  }}
+}}
+
+只输出JSON，不要其他内容"""
+
+        user_message = f"请评估以下修改后条款的风险：\n\n{clause_text[:3000]}"
+
+        try:
+            content = await self.chat(user_message, system_prompt)
+            result = parse_json_from_llm(content)
+
+            if isinstance(result, dict):
+                merged = self._merge_incremental_result(previous_result, result, clause_id)
+                # 重新计算量化指标
+                risks = merged.get("risks", [])
+                merged["risk_quantification"] = self.quantify_risk(risks)
+                merged["mitigation_plan"] = self.suggest_mitigation(risks)
+                self.write_shared("risk_assessor", merged, MemoryLayer.ANALYSIS, validate=False)
+                # 缓存结果（按会话隔离）
+                if self._private_memory:
+                    self._private_memory.set_cache(self._get_cache_key(), merged)
+                # 发布事件
+                self.publish_event(BusinessEvent.RISK_ANALYZED, {"session_id": task.get("session_id")})
+                return merged
+        except Exception as e:
+            logger.error(f"增量风险分析失败: {e}")
+
+        # 降级：返回上次结果
+        return previous_result
+
+    def _merge_incremental_result(self, old_result: Dict[str, Any], new_clause_result: Dict[str, Any], clause_id: str) -> Dict[str, Any]:
+        """
+        合并增量分析结果
+
+        Args:
+            old_result: 上次的完整结果
+            new_clause_result: 新条款的分析结果
+            clause_id: 被修改的条款ID
+
+        Returns:
+            合并后的结果
+        """
+        merged = old_result.copy()
+
+        # 替换受影响条款的风险
+        old_risks = merged.get("risks", [])
+        # 过滤掉旧条款相关风险
+        filtered_risks = [r for r in old_risks if clause_id not in str(r.get("related_clause", ""))]
+        # 添加新风险
+        new_risks = new_clause_result.get("risks", [])
+        for risk in new_risks:
+            risk["related_clause"] = clause_id
+        filtered_risks.extend(new_risks)
+
+        merged["risks"] = filtered_risks
+
+        # 更新风险等级
+        if new_clause_result.get("risk_level"):
+            merged["risk_level"] = new_clause_result["risk_level"]
+
+        # 标记为增量更新
+        merged["incremental_update"] = True
+        merged["updated_clause_id"] = clause_id
+
+        # 更新 summary
+        if "summary" in merged:
+            merged["summary"]["total_risks"] = len(filtered_risks)
+            high_count = sum(1 for r in filtered_risks if r.get("severity") == "high")
+            medium_count = sum(1 for r in filtered_risks if r.get("severity") == "medium")
+            low_count = sum(1 for r in filtered_risks if r.get("severity") == "low")
+            merged["summary"]["high_risks"] = high_count
+            merged["summary"]["medium_risks"] = medium_count
+            merged["summary"]["low_risks"] = low_count
+
+        return merged

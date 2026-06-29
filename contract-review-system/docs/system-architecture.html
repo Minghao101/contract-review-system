@@ -110,7 +110,7 @@
 <body>
 
 <header class="hero">
-    <div class="badge">Architecture & Code Logic v4.0</div>
+    <div class="badge">Architecture & Code Logic v5.0</div>
     <h1>智能合同审查系统</h1>
     <p>LangChain + 多 Agent + LLM Function Calling &mdash; 完整架构与代码逻辑说明</p>
 </header>
@@ -198,9 +198,10 @@
             </div></div>
             <div style="text-align:center;color:var(--text-muted);font-size:1.1rem;">&#8595;</div>
             <div class="layer"><div class="layer-lb">Coordination Layer</div><div class="layer-ns">
-                <div class="fn3 core" style="min-width:220px;"><div class="ic">MultiTurnHandler</div><div class="lb">核心调度器</div><div class="ds">意图识别 + Agent 路由</div></div>
-                <div class="fn3 core"><div class="ic">IntentRecognizer</div><div class="lb">意图识别</div><div class="ds">LLM Function Calling</div></div>
-                <div class="fn3 core"><div class="ic">ConversationContext</div><div class="lb">会话上下文</div><div class="ds">消息 + 轮次 + Agent 结果</div></div>
+                <div class="fn3 core" style="min-width:220px;"><div class="ic">MultiTurnHandler</div><div class="lb">核心调度器</div><div class="ds">意图识别 + Agent 路由 + 聚合屏障</div></div>
+                <div class="fn3 core"><div class="ic">IntentRecognizer</div><div class="lb">意图识别</div><div class="ds">LLM Function Calling（9种意图）</div></div>
+                <div class="fn3 core"><div class="ic">SharedMemory</div><div class="lb">共享记忆</div><div class="ds">CONTEXT/ANALYSIS/DECISION 三层</div></div>
+                <div class="fn3 core"><div class="ic">MessageBus</div><div class="lb">消息总线</div><div class="ds">事件发布/订阅</div></div>
             </div></div>
             <div style="text-align:center;color:var(--text-muted);font-size:1.1rem;">&#8595;</div>
             <div class="layer"><div class="layer-lb">Agent Layer</div><div class="layer-ns">
@@ -263,28 +264,43 @@
 <section id="base-agent" style="background:rgba(30,41,59,.5);">
     <div class="container">
         <h2>4. BaseAgent 基类 &mdash; base_agent.py</h2>
-        <p class="sub">所有 Agent 的父类，通过 LangChainAgentWrapper 与 LLM 交互</p>
+        <p class="sub">所有 Agent 的父类，提供共享内存、消息总线、聚合屏障等基础设施</p>
         <div class="cb">
             <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">src/agents/base_agent.py</span></div>
             <div class="cb-c">
 <span class="kw">class</span> <span class="cl">BaseAgent</span>(ABC):
     <span class="kw">def</span> <span class="fn2">__init__</span>(self, agent_id, name, role, llm=<span class="kw">None</span>):
-        self.agent_id = agent_id       <span class="cm"># "document_parser"</span>
-        self.name = name               <span class="cm"># "文档解析Agent"</span>
-        self.role = role               <span class="cm"># 用于路由查找</span>
-        self.llm = llm <span class="kw">or</span> get_llm()   <span class="cm"># LangChain LLM 实例</span>
+        self.agent_id = agent_id
+        self.llm = llm <span class="kw">or</span> get_llm()
+        self._shared_memory = <span class="kw">None</span>   <span class="cm"># 绑定后可用</span>
+        self._message_bus = <span class="kw">None</span>     <span class="cm"># 绑定后可用</span>
+        self._private_memory = <span class="kw">None</span>  <span class="cm"># AgentPrivateMemory 实例</span>
 
+    <span class="cm"># 基础设施绑定（调度器启动时调用）</span>
+    <span class="kw">def</span> <span class="fn2">bind_infrastructure</span>(self, shared_memory, message_bus, on_all_complete=<span class="kw">None</span>):
+        self._shared_memory = shared_memory
+        self._message_bus = message_bus
+        self._private_memory = <span class="cl">AgentPrivateMemory</span>(self.agent_id)
+
+    <span class="cm"># 共享内存读写</span>
+    <span class="kw">def</span> <span class="fn2">read_shared</span>(self, key, layer): ...
+    <span class="kw">def</span> <span class="fn2">write_shared</span>(self, key, value, layer, validate=<span class="kw">True</span>): ...
+
+    <span class="cm"># 事件发布</span>
+    <span class="kw">def</span> <span class="fn2">publish_event</span>(self, event_type, data): ...
+
+    <span class="cm"># 聚合屏障：递减计数器，归零时触发回调</span>
+    <span class="kw">def</span> <span class="fn2">decrement_pending_count</span>(self) -> bool: ...
+
+    <span class="cm"># LLM 交互</span>
     <span class="kw">async def</span> <span class="fn2">chat</span>(self, message, system_prompt=<span class="kw">None</span>) -> str:
-        <span class="cm">"""与LLM异步对话（通过 LangChainAgentWrapper）"""</span>
         <span class="kw">return await</span> self.wrapper.achat(message, system_prompt)
 
     <span class="kw">@abstractmethod</span>
-    <span class="kw">async def</span> <span class="fn2">process</span>(self, task: Dict) -> Dict:
-        <span class="cm">"""每个子类必须实现"""</span>
-        <span class="kw">pass</span>
+    <span class="kw">async def</span> <span class="fn2">process</span>(self, task: Dict) -> Dict: ...
             </div>
         </div>
-        <div class="explain"><strong>LLM 交互链路：</strong><code>Agent.process()</code> &rarr; <code>self.chat(msg, prompt)</code> &rarr; <code>LangChainAgentWrapper.achat()</code> &rarr; <code>llm.ainvoke(messages)</code> &rarr; <code>extract_llm_content()</code> 处理响应格式。</div>
+        <div class="explain"><strong>基础设施绑定：</strong>调度器在 <code>handle_message()</code> 中调用 <code>bind_infrastructure()</code>，将 SharedMemoryManager、MessageBus、AgentPrivateMemory 注入每个 Agent。Agent 通过 <code>read_shared()</code>/<code>write_shared()</code> 访问共享数据，通过 <code>publish_event()</code> 发布业务事件，通过 <code>decrement_pending_count()</code> 参与聚合屏障。</div>
     </div>
 </section>
 
@@ -318,11 +334,12 @@
 核心规则（按优先级）：
 1. 用户打招呼 → greeting
 2. 用户追问之前的结果 → question_answer
-3. 用户提到"风险" → risk_assessment
-4. 用户提到"合规" → compliance_check
-5. 用户提到"条款" → clause_analysis
-6. 只有明确说"完整审查" → contract_review
-7. 其他提问 → question_answer
+3. 用户要求修改条款 → modify_contract
+4. 用户提到"风险" → risk_assessment
+5. 用户提到"合规" → compliance_check
+6. 用户提到"条款" → clause_analysis
+7. 只有明确说"完整审查" → contract_review
+8. 其他提问 → question_answer
 
 用户输入: {text}"""</span>)]
 
@@ -335,6 +352,7 @@
             <thead><tr><th>意图类型</th><th>判断规则</th><th>路由目标</th><th>需要合同</th></tr></thead>
             <tbody>
                 <tr><td><code>contract_review</code></td><td>明确要求"完整/全面/整体审查"</td><td>4个 Agent 并行</td><td>是</td></tr>
+                <tr><td><code>modify_contract</code></td><td>要求修改条款（"把第X条...改成..."）</td><td>增量修改流程</td><td>是</td></tr>
                 <tr><td><code>risk_assessment</code></td><td>提到"风险"</td><td>RiskAssessmentAgent</td><td>是</td></tr>
                 <tr><td><code>compliance_check</code></td><td>提到"合规/合法"</td><td>ComplianceCheckerAgent</td><td>是</td></tr>
                 <tr><td><code>clause_analysis</code></td><td>提到"条款"</td><td>ClauseAnalysisAgent</td><td>是</td></tr>
@@ -352,54 +370,79 @@
 <section id="multi-turn" style="background:rgba(30,41,59,.5);">
     <div class="container">
         <h2>6. MultiTurnHandler &mdash; 核心调度器</h2>
-        <p class="sub">意图识别 &rarr; Agent 路由 &rarr; 并行执行 &rarr; 结果存储 &rarr; 回复生成</p>
+        <p class="sub">意图识别 &rarr; 共享内存初始化 &rarr; 事件驱动执行 &rarr; 聚合屏障 &rarr; 回复生成</p>
 
         <div class="arch-box">
-            <div class="arch-t">MultiTurnHandler 执行流程</div>
+            <div class="arch-t">MultiTurnHandler 执行流程（事件驱动）</div>
             <div class="cf">
                 <div class="cr"><div class="cb2 b">用户发送消息</div></div>
                 <div class="ca">&#8595;</div>
-                <div class="cr"><div class="cb2 p">ctx.add_user_message()</div></div>
-                <div class="clb">存储到 ConversationContext._messages</div>
-                <div class="ca">&#8595;</div>
                 <div class="cr"><div class="cb2 p">IntentRecognizer.recognize()</div></div>
-                <div class="clb">LLM Function Calling 识别意图</div>
+                <div class="clb">LLM Function Calling 识别意图（9种）</div>
                 <div class="ca">&#8595;</div>
-                <div class="cr"><div class="cb2 o" style="min-width:260px;">INTENT_AGENT_ROUTING[intent]</div></div>
-                <div class="clb">静态路由表查找目标 Agent</div>
+                <div class="cr"><div class="cb2 p" style="min-width:260px;">_init_infrastructure()</div></div>
+                <div class="clb">创建 SharedMemoryManager + MessageBus，写入 CONTEXT 层</div>
+                <div class="ca">&#8595;</div>
+                <div class="cr"><div class="cb2 p">bind_infrastructure() &rarr; 所有 Agent</div></div>
+                <div class="clb">绑定共享内存 + 消息总线 + 聚合屏障回调</div>
                 <div class="ca">&#8595;</div>
                 <div class="clb" style="margin-bottom:4px;">根据意图类型分支：</div>
                 <div class="cpar">
-                    <div class="cb2 g">contract_review<br><span style="font-size:.7rem;">4个Agent并行</span></div>
+                    <div class="cb2 g">contract_review<br><span style="font-size:.7rem;">聚合屏障驱动</span></div>
+                    <div class="cb2 o">modify_contract<br><span style="font-size:.7rem;">增量修改流程</span></div>
                     <div class="cb2 g">risk/clause/compliance<br><span style="font-size:.7rem;">单Agent执行</span></div>
                     <div class="cb2 g">question_answer<br><span style="font-size:.7rem;">LLM直接回答</span></div>
                 </div>
-                <div class="ca">&#8595;</div>
-                <div class="cr"><div class="cb2 p">ctx.set_agent_result()</div></div>
-                <div class="clb">结果存入 _turns[*].agent_results</div>
                 <div class="ca">&#8595;</div>
                 <div class="cr"><div class="cb2 b">返回结果 + 格式化回复</div></div>
             </div>
         </div>
 
         <div class="cb">
-            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">multi_turn_handler.py &mdash; 路由表</span></div>
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">multi_turn_handler.py &mdash; 意图到 Agent 映射</span></div>
             <div class="cb-c">
-<span class="cm"># 意图到 Agent 的静态路由映射</span>
-INTENT_AGENT_ROUTING = {
-    IntentType.CONTRACT_REVIEW: {
-        <span class="st">"agents"</span>: [<span class="st">"document_parser"</span>, <span class="st">"clause_analyst"</span>, <span class="st">"risk_assessor"</span>, <span class="st">"compliance_checker"</span>],
-        <span class="st">"parallel"</span>: <span class="kw">True</span>,  <span class="cm"># 4个Agent并行执行</span>
-    },
-    IntentType.RISK_ASSESSMENT: {
-        <span class="st">"agents"</span>: [<span class="st">"risk_assessor"</span>],
-    },
-    IntentType.QUESTION_ANSWER: {
-        <span class="st">"agents"</span>: [],  <span class="cm"># 无Agent，LLM直接回答</span>
-        <span class="st">"direct_response"</span>: <span class="kw">True</span>,
-    },
-    <span class="cm"># ... 其他意图</span>
+<span class="cm"># 意图到所需 Agent 的映射</span>
+INTENT_REQUIRED_AGENTS = {
+    IntentType.CONTRACT_REVIEW: [<span class="st">"document_parser"</span>, <span class="st">"risk_assessor"</span>, <span class="st">"clause_analyst"</span>, <span class="st">"compliance_checker"</span>, <span class="st">"report_generator"</span>],
+    IntentType.MODIFY_CONTRACT: [<span class="st">"document_parser"</span>, <span class="st">"risk_assessor"</span>, <span class="st">"clause_analyst"</span>, <span class="st">"compliance_checker"</span>],
+    IntentType.RISK_ASSESSMENT:  [<span class="st">"risk_assessor"</span>],
+    IntentType.CLAUSE_ANALYSIS:  [<span class="st">"clause_analyst"</span>],
+    IntentType.COMPLIANCE_CHECK: [<span class="st">"compliance_checker"</span>],
+    IntentType.REPORT_GENERATION: [<span class="st">"report_generator"</span>],
 }
+            </div>
+        </div>
+
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">完整审查链路 &mdash; 聚合屏障驱动</span></div>
+            <div class="cb-c">
+<span class="kw">async def</span> <span class="fn2">_execute_full_review_chain</span>(self, task):
+    <span class="cm"># Step 1: DocumentParser 执行</span>
+    <span class="kw">await</span> self._execute_single_agent(<span class="st">"document_parser"</span>, task)
+
+    <span class="cm"># Step 2: 并行启动分析 Agent（不等待完成）</span>
+    analysis_tasks = [self._execute_single_agent(name, task) <span class="kw">for</span> name <span class="kw">in</span> [<span class="st">"risk_assessor"</span>, <span class="st">"clause_analyst"</span>, <span class="st">"compliance_checker"</span>]]
+    asyncio.<span class="fn2">create_task</span>(asyncio.gather(*analysis_tasks))
+
+    <span class="cm"># 等待聚合屏障归零（所有分析 Agent 完成后自动触发 ReportGenerator）</span>
+    <span class="kw">await</span> self._analysis_complete_event.<span class="fn2">wait</span>()
+            </div>
+        </div>
+
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">增量修改流程</span></div>
+            <div class="cb-c">
+<span class="kw">async def</span> <span class="fn2">_execute_incremental_modify</span>(self, task):
+    <span class="cm"># Step 1: LLM 解析修改指令</span>
+    instruction = <span class="kw">await</span> self._parse_modify_instruction(user_message)
+    <span class="cm"># → {action: "replace", locate_value: "第三条", old: "5%", new: "3%"}</span>
+
+    <span class="cm"># Step 2: DocumentParser 定位并替换条款</span>
+    <span class="kw">await</span> self._execute_single_agent(<span class="st">"document_parser"</span>, task)
+
+    <span class="cm"># Step 3: 并行增量分析（各 Agent 从缓存读取上次结果，只分析修改条款）</span>
+    analysis_tasks = [self._execute_single_agent(name, task) <span class="kw">for</span> name <span class="kw">in</span> [<span class="st">"risk_assessor"</span>, <span class="st">"clause_analyst"</span>, <span class="st">"compliance_checker"</span>]]
+    <span class="kw">await</span> asyncio.gather(*analysis_tasks)
             </div>
         </div>
 
@@ -408,12 +451,9 @@ INTENT_AGENT_ROUTING = {
             <div class="cb-c">
 <span class="kw">async def</span> <span class="fn2">_answer_from_context</span>(self, user_message, ctx):
     <span class="cm"># 只用两个字段构建上下文：</span>
-    <span class="cm"># 1. 合同内容</span>
     contract_text = ctx.get_contract_text()   <span class="cm"># → _shared_data["contract_text"]</span>
-    <span class="cm"># 2. 对话历史</span>
     messages = ctx.get_messages()             <span class="cm"># → _messages</span>
 
-    <span class="cm"># 发给 LLM 生成回答</span>
     response = <span class="kw">await</span> llm.ainvoke([
         SystemMessage(content=<span class="st">"你是一个合同审查助手..."</span>),
         HumanMessage(content=<span class="st">f"{上下文}\n\n用户问题：{user_message}"</span>)
@@ -422,7 +462,7 @@ INTENT_AGENT_ROUTING = {
             </div>
         </div>
 
-        <div class="explain"><strong>追问机制：</strong>追问（question_answer）不读取 Agent 原始结果，而是用合同文本 + 对话历史（_messages）构建上下文，让 LLM 直接回答。因为 _messages 中助手的回复已经包含了格式化的分析结果。</div>
+        <div class="explain"><strong>事件驱动架构：</strong>Agent 完成后递减 <code>_pending_count</code>，归零时回调触发 ReportGenerator。调度器通过 <code>asyncio.Event</code> 等待完成，而非手动 <code>asyncio.gather()</code>。增量修改时，各 Agent 从 <code>AgentPrivateMemory</code> 缓存读取上次结果，只重新分析修改后的条款。</div>
     </div>
 </section>
 
@@ -580,37 +620,70 @@ INTENT_AGENT_ROUTING = {
 <section id="memory">
     <div class="container">
         <h2>13. 四层记忆系统</h2>
-        <p class="sub">设计了 4 层，实际在用 2 层</p>
+        <p class="sub">4 层记忆全部在用，各司其职</p>
         <div class="mg">
-            <div class="mc active"><div class="mi">Context</div><h4>对话上下文</h4><p><code>ConversationContext</code> &mdash; 消息历史 + 意图链 + Agent 结果（_turns）+ 共享数据（_shared_data）。<strong>核心在用。</strong></p></div>
-            <div class="mc active"><div class="mi">LongTerm</div><h4>长期记忆</h4><p><code>LongTermMemory</code> &mdash; Qdrant 向量持久化：审查历史 + 用户偏好。支持跨会话语义检索。<strong>核心在用。</strong></p></div>
-            <div class="mc inactive"><div class="mi">Private</div><h4>私有记忆</h4><p><code>BaseAgent.private_memory</code> 字典。已定义但未接入。</p></div>
-            <div class="mc inactive"><div class="mi">Shared</div><h4>共享记忆</h4><p><code>SharedMemoryManager</code>。已定义但未接入，Agent 间数据通过 _shared_data 传递。</p></div>
+            <div class="mc active"><div class="mi">Context</div><h4>对话上下文</h4><p><code>ConversationContext</code> &mdash; 消息历史 + 意图链 + Agent 结果（_turns）+ 共享数据（_shared_data）。<strong>多轮对话核心。</strong></p></div>
+            <div class="mc active"><div class="mi">LongTerm</div><h4>长期记忆</h4><p><code>LongTermMemory</code> &mdash; Qdrant 向量持久化：审查历史 + 用户偏好。支持跨会话语义检索。</p></div>
+            <div class="mc active"><div class="mi">Private</div><h4>私有记忆</h4><p><code>AgentPrivateMemory</code> &mdash; Agent 级缓存。增量修改时复用上次分析结果，避免全量重算。</p></div>
+            <div class="mc active"><div class="mi">Shared</div><h4>共享记忆</h4><p><code>SharedMemoryManager</code> &mdash; 事件驱动核心。三层存储（CONTEXT/ANALYSIS/DECISION），Agent 间数据通道。</p></div>
         </div>
 
         <div class="cb">
-            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">ConversationContext &mdash; 核心数据结构</span></div>
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">SharedMemoryManager &mdash; 三层存储</span></div>
             <div class="cb-c">
-<span class="kw">class</span> <span class="cl">ConversationContext</span>:
-    _messages: deque          <span class="cm"># 对话历史 (用户+助手)</span>
-    _turns: List[TurnContext] <span class="cm"># 每轮对话记录</span>
-    <span class="cm">#   TurnContext.intent           = 该轮意图</span>
-    <span class="cm">#   TurnContext.agent_results    = 该轮 Agent 结果 ← Agent 结果存在这里</span>
-    _shared_data: Dict        <span class="cm"># Agent 间共享数据</span>
-    <span class="cm">#   "contract_text"  = 合同文本</span>
-    <span class="cm">#   "parsed_result"  = Agent 间传递的中间数据</span>
-    _intent_chain: List[str]  <span class="cm"># 意图序列</span>
+<span class="cm"># 三层存储，职责分明</span>
+CONTEXT  = <span class="st">"context"</span>   <span class="cm"># 原始输入（调度器写入，Agent 只读）</span>
+ANALYSIS = <span class="st">"analysis"</span>  <span class="cm"># Agent 分析结果（各 Agent 写入，下游读取）</span>
+DECISION = <span class="st">"decision"</span>  <span class="cm"># 最终报告（ReportGenerator 写入）</span>
 
-<span class="kw">def</span> <span class="fn2">set_agent_result</span>(self, agent_name, result):
-    <span class="cm"># 只写 _turns，不写 _shared_data</span>
-    self._current_turn.agent_results[agent_name] = result
+<span class="cm"># CONTEXT 层数据</span>
+<span class="st">"contract_text"</span>      <span class="cm"># 合同原文</span>
+<span class="st">"contract_type"</span>      <span class="cm"># 合同类型</span>
+<span class="st">"intent_type"</span>        <span class="cm"># 意图类型（Agent 据此判断走增量/全量分支）</span>
+<span class="st">"user_message"</span>       <span class="cm"># 用户原始消息（修改指令解析使用）</span>
+<span class="st">"_pending_count"</span>     <span class="cm"># 聚合屏障计数器</span>
+<span class="st">"_required_agents"</span>   <span class="cm"># 需要执行的 Agent 列表</span>
 
-<span class="kw">def</span> <span class="fn2">get_all_results</span>(self):
-    <span class="cm"># 从所有 _turns 收集 Agent 结果</span>
-    results = {}
-    <span class="kw">for</span> turn <span class="kw">in</span> self._turns:
-        results.update(turn.agent_results)
-    <span class="kw">return</span> results
+<span class="cm"># ANALYSIS 层数据</span>
+<span class="st">"parsed_result"</span>      <span class="cm"># DocumentParserAgent → 下游 Agent</span>
+<span class="st">"risk_result"</span>        <span class="cm"># RiskAssessmentAgent → ReportGenerator</span>
+<span class="st">"clause_result"</span>      <span class="cm"># ClauseAnalysisAgent → ReportGenerator</span>
+<span class="st">"compliance_result"</span>  <span class="cm"># ComplianceCheckerAgent → ReportGenerator</span>
+<span class="st">"modify_instruction"</span> <span class="cm"># MultiTurnHandler → DocumentParser</span>
+<span class="st">"updated_clause"</span>     <span class="cm"># DocumentParser → 各分析 Agent（增量修改）</span>
+
+<span class="cm"># Agent 读写模式</span>
+contract_text = self.<span class="fn2">read_shared</span>(<span class="st">"contract_text"</span>, MemoryLayer.CONTEXT)
+self.<span class="fn2">write_shared</span>(<span class="st">"risk_result"</span>, result, MemoryLayer.ANALYSIS)
+            </div>
+        </div>
+
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">AgentPrivateMemory &mdash; 增量分析缓存</span></div>
+            <div class="cb-c">
+<span class="cm"># 全量分析完成后缓存结果</span>
+self._private_memory.<span class="fn2">set_cache</span>(<span class="st">"last_result"</span>, result)
+
+<span class="cm"># 增量修改时读取缓存，只分析修改后的条款</span>
+cached = self._private_memory.<span class="fn2">get_cache</span>(<span class="st">"last_result"</span>)
+<span class="kw">if</span> cached:
+    <span class="cm"># 只重新分析修改条款，合并到缓存结果</span>
+    <span class="kw">return await</span> self._incremental_analyze(updated_clause, cached)
+            </div>
+        </div>
+
+        <div class="cb">
+            <div class="cb-h"><div class="dots"><span class="d"></span><span class="d"></span><span class="d"></span></div><span class="fn">聚合屏障 &mdash; 事件驱动触发</span></div>
+            <div class="cb-c">
+<span class="cm"># BaseAgent.decrement_pending_count()</span>
+<span class="cm"># 每个分析 Agent 完成后递减计数器</span>
+current = self._shared_memory.<span class="fn2">read</span>(<span class="st">"coordinator"</span>, <span class="st">"_pending_count"</span>, CONTEXT)
+new_count = current - <span class="cm">1</span>
+self._shared_memory.<span class="fn2">write</span>(<span class="st">"coordinator"</span>, <span class="st">"_pending_count"</span>, new_count, CONTEXT)
+
+<span class="kw">if</span> new_count == <span class="cm">0</span>:
+    <span class="cm"># 所有分析完成 → 触发 ReportGenerator</span>
+    self._on_all_analyses_complete()  <span class="cm"># 回调通知调度器</span>
             </div>
         </div>
 
@@ -668,16 +741,18 @@ INTENT_AGENT_ROUTING = {
 │   ├── agents/
 │   │   ├── <span class="cl">base_agent.py</span>           <span class="cm"># Agent 基类：chat() + process() 抽象方法</span>
 │   │   ├── <span class="cl">langchain_agent.py</span>      <span class="cm"># LangChain 包装器：achat() 异步 LLM 调用</span>
-│   │   ├── <span class="fn2">multi_turn_handler.py</span>  <span class="cm"># ★核心★：意图→路由→执行→存储</span>
-│   │   ├── <span class="fn2">intent_recognizer.py</span>   <span class="cm"># 意图识别：LLM Function Calling</span>
+│   │   ├── <span class="fn2">multi_turn_handler.py</span>  <span class="cm"># ★核心★：事件驱动调度 + 聚合屏障 + 增量修改</span>
+│   │   ├── <span class="fn2">intent_recognizer.py</span>   <span class="cm"># 意图识别：LLM Function Calling（9种意图）</span>
 │   │   ├── <span class="fn2">conversation_context.py</span> <span class="cm"># 会话上下文：消息+轮次+Agent结果</span>
-│   │   ├── <span class="cl">document_parser_agent.py</span> <span class="cm"># LLM 提取 + Map-Reduce 长文本</span>
-│   │   ├── <span class="cl">clause_analysis_agent.py</span>  <span class="cm"># LLM 条款语义分析</span>
-│   │   ├── <span class="cl">risk_assessment_agent.py</span>  <span class="cm"># LLM 风险识别 + 量化</span>
-│   │   ├── <span class="cl">compliance_checker_agent.py</span> <span class="cm"># LLM 合规检查</span>
-│   │   ├── <span class="cl">report_generator_agent.py</span>  <span class="cm"># LLM 汇总报告</span>
-│   │   ├── <span class="fn2">coordinator_agent.py</span>    <span class="cm"># 简化版：仅处理问候/未知意图</span>
-│   │   └── <span class="fn2">communication.py</span>       <span class="cm"># MessageBus（已定义，未在主流程使用）</span>
+│   │   ├── <span class="cl">base_agent.py</span>           <span class="cm"># Agent 基类：共享内存+聚合屏障+事件发布</span>
+│   │   ├── <span class="cl">document_parser_agent.py</span> <span class="cm"># LLM 提取 + Map-Reduce + 增量修改</span>
+│   │   ├── <span class="cl">clause_analysis_agent.py</span>  <span class="cm"># LLM 条款分析 + 增量分析</span>
+│   │   ├── <span class="cl">risk_assessment_agent.py</span>  <span class="cm"># LLM 风险识别 + 量化 + 增量分析</span>
+│   │   ├── <span class="cl">compliance_checker_agent.py</span> <span class="cm"># LLM 合规检查 + 增量分析</span>
+│   │   ├── <span class="cl">report_generator_agent.py</span>  <span class="cm"># LLM 汇总报告（聚合屏障触发）</span>
+│   │   ├── <span class="fn2">shared_data_schemas.py</span>  <span class="cm"># Agent 间数据 Schema（Pydantic 校验）</span>
+│   │   ├── <span class="fn2">business_events.py</span>     <span class="cm"># 业务事件常量（7种事件）</span>
+│   │   └── <span class="fn2">communication.py</span>       <span class="cm"># MessageBus：事件发布/订阅</span>
 │   ├── api/
 │   │   ├── <span class="fn2">main.py</span>                <span class="cm"># FastAPI 入口 + CORS</span>
 │   │   ├── <span class="fn2">routes.py</span>              <span class="cm"># API 路由：review/stream/upload/memory</span>
@@ -687,8 +762,9 @@ INTENT_AGENT_ROUTING = {
 │   │   └── <span class="fn2">vector_store.py</span>        <span class="cm"># Qdrant：bge-m3 Embedding + 向量检索</span>
 │   ├── memory/
 │   │   ├── <span class="fn2">long_term_memory.py</span>    <span class="cm"># 长期记忆：审查历史 → Qdrant</span>
-│   │   ├── <span class="fn2">private_memory.py</span>      <span class="cm"># Agent 私有记忆（已定义，未使用）</span>
-│   │   └── <span class="fn2">shared_memory.py</span>       <span class="cm"># 共享记忆（已定义，未使用）</span>
+│   │   ├── <span class="fn2">private_memory.py</span>      <span class="cm"># Agent 私有记忆：增量分析缓存</span>
+│   │   ├── <span class="fn2">shared_memory.py</span>       <span class="cm"># 共享记忆：事件驱动核心数据通道</span>
+│   │   └── <span class="fn2">memory_layer.py</span>        <span class="cm"># 记忆层次枚举：CONTEXT/ANALYSIS/DECISION</span>
 │   ├── skills/                       <span class="cm"># Skill 注册中心</span>
 │   │   ├── <span class="fn2">risk/risk_identifier.py</span>  <span class="cm"># LLM 风险识别</span>
 │   │   ├── <span class="fn2">legal/regulation_checker.py</span> <span class="cm"># LLM 法规检查</span>
@@ -711,8 +787,8 @@ INTENT_AGENT_ROUTING = {
 </section>
 
 <footer>
-    <p>Contract Review System &mdash; Architecture & Code Logic Document v4.0</p>
-    <p style="margin-top:6px;">LangChain + Multi-Agent + LLM Function Calling &mdash; Zero Keyword Matching</p>
+    <p>Contract Review System &mdash; Architecture & Code Logic Document v5.0</p>
+    <p style="margin-top:6px;">LangChain + Multi-Agent + Event-Driven + Incremental Modification</p>
 </footer>
 
 </body>

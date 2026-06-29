@@ -54,6 +54,12 @@ class ComplianceCheckerAgent(BaseAgent):
         )
         logger.info(f"合规检查Agent初始化完成: {name}")
 
+    def _get_cache_key(self) -> str:
+        """获取当前会话的缓存键（使用会话级 contextvar，跨请求稳定）"""
+        from .multi_turn_handler import _current_session_id
+        session_id = _current_session_id.get()
+        return f"{session_id}:last_result"
+
     async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """
         处理合规检查任务
@@ -68,24 +74,32 @@ class ComplianceCheckerAgent(BaseAgent):
         Returns:
             合规检查结果
         """
-        # 优先从共享内存读取（事件驱动模式）
-        contract_text = self.read_shared("contract_text", MemoryLayer.CONTEXT) or ""
-        contract_type = self.read_shared("contract_type", MemoryLayer.CONTEXT) or "general"
-
-        # 兼容旧模式：从 task 参数读取
-        if not contract_text:
-            contract_text = task.get("contract_text", "")
-        if contract_type == "general":
-            contract_type = task.get("contract_type", "general")
-
-        if not contract_text:
-            return {"error": "合同文本为空"}
-
-        # 更新状态
         self.set_running(True)
         self.update_activity()
 
         try:
+            # 优先从共享内存读取（事件驱动模式）
+            contract_text = self.read_shared("contract_text", MemoryLayer.CONTEXT) or ""
+            contract_type = self.read_shared("contract_type", MemoryLayer.CONTEXT) or "general"
+
+            # 兼容旧模式：从 task 参数读取
+            if not contract_text:
+                contract_text = task.get("contract_text", "")
+            if contract_type == "general":
+                contract_type = task.get("contract_type", "general")
+
+            # 增量修改分支
+            intent_type = self.read_shared("intent_type", MemoryLayer.CONTEXT)
+            if intent_type == "modify_contract":
+                updated_clause = self.read_shared("updated_clause", MemoryLayer.ANALYSIS)
+                if updated_clause:
+                    cached = self._private_memory.get_cache(self._get_cache_key()) if self._private_memory else None
+                    if cached:
+                        return await self._incremental_analyze(updated_clause, cached, task)
+
+            if not contract_text:
+                return {"error": "合同文本为空"}
+
             logger.info(f"开始合规检查，合同类型: {contract_type}，文本长度: {len(contract_text)}")
 
             result = await self._check_with_llm(contract_text, contract_type)
@@ -95,8 +109,12 @@ class ComplianceCheckerAgent(BaseAgent):
 
             logger.info(f"合规检查完成，合规状态: {result.get('compliance_status', 'unknown')}")
 
+            # 缓存结果（供增量分析使用，按会话隔离）
+            if self._private_memory:
+                self._private_memory.set_cache(self._get_cache_key(), result)
+
             # 阶段1：写入共享内存 + 发布事件
-            self.write_shared("compliance_result", result, MemoryLayer.ANALYSIS)
+            self.write_shared("compliance_checker", result, MemoryLayer.ANALYSIS, validate=False)
             self.publish_event(BusinessEvent.COMPLIANCE_CHECKED, {"session_id": task.get("session_id")})
             logger.info(f"已发布事件: {BusinessEvent.COMPLIANCE_CHECKED}")
 
@@ -104,7 +122,7 @@ class ComplianceCheckerAgent(BaseAgent):
         except Exception as e:
             logger.error(f"合规检查Agent异常: {e}", exc_info=True)
             error_result = {"error": str(e), "compliance_status": "unknown", "checked_regulations": [], "missing_clauses": [], "compliance_violations": [], "score": 0, "summary": {}}
-            self.write_shared("compliance_result", error_result, MemoryLayer.ANALYSIS)
+            self.write_shared("compliance_checker", error_result, MemoryLayer.ANALYSIS, validate=False)
             self.publish_event(BusinessEvent.COMPLIANCE_CHECKED, {"session_id": task.get("session_id")})
             return error_result
         finally:
@@ -232,4 +250,103 @@ class ComplianceCheckerAgent(BaseAgent):
         result.setdefault("score", 0)
         result.setdefault("summary", {})
         return result
+
+    # ==================== 增量分析 ====================
+
+    async def _incremental_analyze(self, updated_clause: Dict[str, Any], previous_result: Dict[str, Any], task: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        单条款增量合规检查
+
+        Args:
+            updated_clause: 更新后的条款
+            previous_result: 上次的完整分析结果
+            task: 任务数据
+
+        Returns:
+            合并后的合规检查结果
+        """
+        clause_text = updated_clause.get("content", "")
+        clause_id = updated_clause.get("id", "")
+        action = updated_clause.get("action", "replace")
+        contract_type = self.read_shared("contract_type", MemoryLayer.CONTEXT) or "general"
+
+        logger.info(f"增量合规检查: clause={clause_id}, action={action}")
+
+        if action == "deleted":
+            merged = self._merge_incremental_result(previous_result, {"compliance_violations": []}, clause_id)
+            self.write_shared("compliance_checker", merged, MemoryLayer.ANALYSIS, validate=False)
+            if self._private_memory:
+                self._private_memory.set_cache(self._get_cache_key(), merged)
+            return merged
+
+        required = self.REQUIRED_CLAUSES.get(contract_type, self.REQUIRED_CLAUSES["general"])
+
+        system_prompt = f"""你是一个专业的合同合规审查专家。以下条款刚刚被修改，请只检查这个条款的合规性。
+
+条款编号: {clause_id}
+条款内容: {clause_text}
+当前合同类型: {contract_type}
+该类型合同必备条款: {', '.join(required)}
+
+输出格式要求（必须是严格有效的JSON）：
+{{
+  "compliance_violations": [
+    {{
+      "clause": "有问题的条款内容",
+      "regulation": "违反的法规或标准",
+      "severity": "high/medium/low",
+      "suggestion": "修改建议"
+    }}
+  ],
+  "compliance_status": "compliant/partial/non_compliant",
+  "score": 85,
+  "summary": {{
+    "assessment": "合规评估说明"
+  }}
+}}
+
+只输出JSON，不要其他内容"""
+
+        user_message = f"请检查以下修改后条款的合规性：\n\n{clause_text[:3000]}"
+
+        try:
+            content = await self.chat(user_message, system_prompt)
+            result = parse_json_from_llm(content)
+
+            if isinstance(result, dict):
+                merged = self._merge_incremental_result(previous_result, result, clause_id)
+                self.write_shared("compliance_checker", merged, MemoryLayer.ANALYSIS, validate=False)
+                if self._private_memory:
+                    self._private_memory.set_cache(self._get_cache_key(), merged)
+                self.publish_event(BusinessEvent.COMPLIANCE_CHECKED, {"session_id": task.get("session_id")})
+                return merged
+        except Exception as e:
+            logger.error(f"增量合规检查失败: {e}")
+
+        return previous_result
+
+    def _merge_incremental_result(self, old_result: Dict[str, Any], new_clause_result: Dict[str, Any], clause_id: str) -> Dict[str, Any]:
+        """合并增量合规检查结果"""
+        merged = old_result.copy()
+
+        # 替换受影响条款的违规项
+        old_violations = merged.get("compliance_violations", [])
+        filtered_violations = [v for v in old_violations if clause_id not in str(v.get("related_clause", ""))]
+        new_violations = new_clause_result.get("compliance_violations", [])
+        for v in new_violations:
+            v["related_clause"] = clause_id
+        filtered_violations.extend(new_violations)
+
+        merged["compliance_violations"] = filtered_violations
+
+        # 更新合规状态
+        if new_clause_result.get("compliance_status"):
+            merged["compliance_status"] = new_clause_result["compliance_status"]
+        if new_clause_result.get("score"):
+            merged["score"] = new_clause_result["score"]
+
+        merged["incremental_update"] = True
+        merged["updated_clause_id"] = clause_id
+
+        return merged
 

@@ -95,6 +95,13 @@ class DocumentParserAgent(BaseAgent):
         if not contract_text:
             return {"error": "合同文本为空"}
 
+        # 增量修改分支
+        intent_type = self.read_shared("intent_type", MemoryLayer.CONTEXT)
+        if intent_type == "modify_contract":
+            modify_inst = self.read_shared("modify_instruction", MemoryLayer.ANALYSIS)
+            if modify_inst:
+                return await self._apply_modify(modify_inst, task)
+
         # 更新状态
         self.set_running(True)
         self.update_activity()
@@ -128,7 +135,7 @@ class DocumentParserAgent(BaseAgent):
             logger.info(f"合同解析完成，类型: {standardized['contract_type']}，条款数: {len(standardized['sections'])}")
 
             # 阶段1：写入共享内存 + 发布事件
-            self.write_shared("parsed_result", result, MemoryLayer.ANALYSIS)
+            self.write_shared("document_parser", result, MemoryLayer.ANALYSIS, validate=False)
             self.publish_event(BusinessEvent.DOCUMENT_PARSED, {"session_id": task.get("session_id")})
             logger.info(f"已发布事件: {BusinessEvent.DOCUMENT_PARSED}")
 
@@ -544,3 +551,418 @@ class DocumentParserAgent(BaseAgent):
             return True
         except ValueError:
             return False
+
+    # ==================== 增量修改 ====================
+
+    async def _apply_modify(self, instruction: Dict[str, Any], task: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        执行增量修改：定位条款 → 替换文本 → 返回更新后的 parsed_result
+
+        Args:
+            instruction: 修改指令
+            task: 任务数据
+
+        Returns:
+            更新后的解析结果
+        """
+        # 读取已有的解析结果
+        existing_result = self.read_shared("document_parser", MemoryLayer.ANALYSIS)
+        if not existing_result:
+            logger.warning("没有已有的解析结果，先全量解析再执行修改")
+            existing_result = await self._full_parse(task)
+            if "error" in existing_result:
+                return existing_result
+            # 全量解析后重新读取（_full_parse 已写入 SharedMemory）
+            existing_result = self.read_shared("document_parser", MemoryLayer.ANALYSIS)
+
+        sections = existing_result.get("sections", [])
+        if not sections:
+            return {"error": "合同条款为空，无法执行修改"}
+
+        action = instruction.get("action", "replace")
+        locate_type = instruction.get("locate_type", "clause_number")
+        locate_value = instruction.get("locate_value", "")
+
+        logger.info(f"增量修改: action={action}, locate={locate_type}, value={locate_value}")
+
+        # 定位目标条款
+        target_section, confidence = self._locate_clause(sections, instruction)
+
+        if target_section is None:
+            # 降级：尝试用 LLM 语义定位
+            target_section, confidence = await self._locate_clause_by_llm(sections, instruction)
+
+        if target_section is None:
+            # insert 操作：用 LLM 决定插入位置并生成条款内容
+            if action == "insert":
+                result = await self._insert_new_clause(sections, instruction, existing_result, task)
+                if not isinstance(result, dict) or "error" not in result:
+                    # 修改成功，确保 CONTEXT 层的 contract_text 也更新
+                    # 检查 sections 中是否有新条款
+                    for s in sections:
+                        if s.get("modified"):
+                            logger.info(f"[诊断] 新条款: id={s.get('id')}, title={s.get('title')}, content前50字={str(s.get('content', ''))[:50]}")
+                    self._update_contract_text_in_context(sections)
+                return result
+            return {"error": f"无法定位条款: {locate_value}", "sections": sections}
+
+        clause_id = target_section.get("id", "unknown")
+        logger.info(f"定位到条款: {clause_id} (confidence={confidence:.2f})")
+
+        # 执行修改
+        if action == "replace":
+            updated_section = self._replace_clause(target_section, instruction)
+        elif action == "delete":
+            updated_section = None
+        elif action == "insert":
+            updated_section = self._insert_clause(target_section, instruction)
+        else:
+            return {"error": f"不支持的操作: {action}"}
+
+        # 更新 sections 列表
+        if action == "delete":
+            sections = [s for s in sections if s.get("id") != clause_id]
+        elif action == "replace":
+            sections = [updated_section if s.get("id") == clause_id else s for s in sections]
+        elif action == "insert":
+            idx = next((i for i, s in enumerate(sections) if s.get("id") == clause_id), len(sections) - 1)
+            sections.insert(idx + 1, updated_section)
+
+        # 构建更新后的结果
+        updated_result = existing_result.copy()
+        updated_result["sections"] = sections
+        updated_result["document_info"]["sections_count"] = len(sections)
+        updated_result["updated_clause_id"] = clause_id
+
+        # 写入共享内存
+        self.write_shared("document_parser", updated_result, MemoryLayer.ANALYSIS, validate=False)
+
+        # 写入 updated_clause 供下游 Agent 增量分析
+        if action == "delete":
+            self.write_shared("updated_clause", {"id": clause_id, "action": "deleted"}, MemoryLayer.ANALYSIS, validate=False)
+        else:
+            self.write_shared("updated_clause", updated_section, MemoryLayer.ANALYSIS, validate=False)
+
+        # 更新 CONTEXT 层的 contract_text（从 sections 重建）
+        self._update_contract_text_in_context(sections)
+
+        # 发布事件
+        self.publish_event(BusinessEvent.CLAUSE_UPDATED, {
+            "session_id": task.get("session_id"),
+            "clause_id": clause_id,
+            "action": action,
+        })
+
+        logger.info(f"增量修改完成: {action} clause {clause_id}")
+        return updated_result
+
+    def _locate_clause(self, sections: List[Dict], instruction: Dict[str, Any]) -> tuple:
+        """
+        双重匹配定位条款
+
+        Args:
+            sections: 条款列表
+            instruction: 修改指令
+
+        Returns:
+            (匹配的条款, 置信度) 或 (None, 0.0)
+        """
+        locate_type = instruction.get("locate_type", "clause_number")
+        locate_value = instruction.get("locate_value", "")
+
+        # 策略1：条款编号精确匹配
+        if locate_type == "clause_number":
+            for section in sections:
+                section_id = section.get("id", "")
+                if section_id == locate_value:
+                    return section, 1.0
+                # 处理中文编号：第三条 → 3
+                if self._normalize_clause_number(section_id) == self._normalize_clause_number(locate_value):
+                    return section, 0.95
+
+        # 策略2：条款标题模糊匹配
+        if locate_type in ("clause_title", "clause_number"):
+            for section in sections:
+                title = section.get("title", "")
+                if locate_value in title or title in locate_value:
+                    return section, 0.8
+
+        # 策略3：内容关键词匹配
+        for section in sections:
+            content = section.get("content", "")
+            if locate_value in content:
+                return section, 0.6
+
+        return None, 0.0
+
+    def _normalize_clause_number(self, num_str: str) -> str:
+        """归一化条款编号"""
+        import re
+        # 中文数字转阿拉伯数字
+        chinese_map = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
+                       "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
+        for cn, ar in chinese_map.items():
+            if cn in num_str:
+                num_str = num_str.replace(cn, ar)
+        # 提取数字部分
+        match = re.search(r'\d+', num_str)
+        return match.group() if match else num_str
+
+    async def _locate_clause_by_llm(self, sections: List[Dict], instruction: Dict[str, Any]) -> tuple:
+        """
+        用 LLM 语义定位条款（降级策略）
+
+        Args:
+            sections: 条款列表
+            instruction: 修改指令
+
+        Returns:
+            (匹配的条款, 置信度) 或 (None, 0.0)
+        """
+        sections_summary = "\n".join([
+            f"[{s.get('id', '?')}] {s.get('title', '无标题')}: {s.get('content', '')[:80]}"
+            for s in sections
+        ])
+
+        system_prompt = """你是一个合同条款定位专家。根据用户的修改指令，找出对应的条款。
+
+输出格式要求（必须是严格有效的JSON）：
+{"clause_id": "条款编号", "confidence": 0.8}
+
+只输出JSON，不要其他内容"""
+
+        user_message = f"""条款列表：
+{sections_summary}
+
+用户修改指令：{instruction.get('locate_value', '')}
+
+请定位目标条款，只输出JSON。"""
+
+        try:
+            content = await self.chat(user_message, system_prompt)
+            result = parse_json_from_llm(content)
+
+            if isinstance(result, dict):
+                clause_id = result.get("clause_id", "")
+                confidence = result.get("confidence", 0.5)
+                for section in sections:
+                    if section.get("id") == clause_id:
+                        return section, confidence
+        except Exception as e:
+            logger.error(f"LLM条款定位失败: {e}")
+
+        return None, 0.0
+
+    def _replace_clause(self, section: Dict[str, Any], instruction: Dict[str, Any]) -> Dict[str, Any]:
+        """替换条款内容"""
+        old_content = instruction.get("old_content", "")
+        new_content = instruction.get("new_content", "")
+
+        updated = section.copy()
+        if old_content and old_content in updated.get("content", ""):
+            updated["content"] = updated["content"].replace(old_content, new_content)
+        else:
+            updated["content"] = new_content
+
+        updated["modified"] = True
+        return updated
+
+    def _insert_clause(self, target_section: Dict[str, Any], instruction: Dict[str, Any]) -> Dict[str, Any]:
+        """在目标条款后插入新条款"""
+        new_content = instruction.get("new_content", "")
+        target_id = target_section.get("id", "0")
+
+        return {
+            "id": f"{target_id}+",
+            "title": "新增条款",
+            "content": new_content,
+            "level": target_section.get("level", 1),
+            "modified": True,
+        }
+
+    def _update_contract_text_in_context(self, sections: List[Dict[str, Any]]):
+        """
+        从 sections 重建合同文本并更新 CONTEXT 层
+
+        修改/新增/删除条款后，需要同步更新 CONTEXT 层的 contract_text，
+        这样后续追问才能读到修改后的合同内容。
+        """
+        logger.info(f"重建合同文本: {len(sections)} 个条款")
+
+        # 从 sections 重建完整合同文本
+        rebuilt_parts = []
+        for section in sections:
+            section_id = section.get("id", "")
+            title = section.get("title", "")
+            content = section.get("content", "")
+            if section_id:
+                rebuilt_parts.append(f"{section_id} {title}\n{content}")
+            elif title:
+                rebuilt_parts.append(f"{title}\n{content}")
+            else:
+                rebuilt_parts.append(content)
+
+        rebuilt_text = "\n\n".join(rebuilt_parts)
+
+        if not rebuilt_text.strip():
+            logger.warning("重建的合同文本为空，跳过 CONTEXT 更新")
+            return
+
+        logger.info(f"已更新 CONTEXT 层 contract_text（{len(rebuilt_text)}字）")
+
+        # 更新 SharedMemory CONTEXT 层
+        self.write_shared("contract_text", rebuilt_text, MemoryLayer.CONTEXT, validate=False)
+        logger.info(f"已更新 CONTEXT 层 contract_text（{len(rebuilt_text)}字）")
+
+        # 同步更新 ConversationContext（供 _answer_from_context 使用）
+        try:
+            from .multi_turn_handler import _current_session_id
+            session_id = _current_session_id.get()
+            if session_id and session_id != 'default':
+                # 通过 handler 的 conversation_manager 更新
+                from .multi_turn_handler import MultiTurnHandler
+                # 直接找到 conversation_manager 更新 contract_text
+                # 这里通过 SharedMemory 已经更新了，_answer_from_context
+                # 也会从 SharedMemory 读取，所以不需要额外操作
+                logger.info(f"session={session_id} contract_text 已同步更新")
+        except Exception as e:
+            logger.debug(f"更新 ConversationContext 失败（可忽略）: {e}")
+
+    async def _insert_new_clause(
+        self,
+        sections: List[Dict],
+        instruction: Dict[str, Any],
+        existing_result: Dict[str, Any],
+        task: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        新增条款（合同中不存在目标条款时的处理）
+
+        用 LLM 分析合同结构，决定插入位置并生成条款内容。
+
+        Args:
+            sections: 现有条款列表
+            instruction: 修改指令
+            existing_result: 已有的解析结果
+            task: 任务数据
+
+        Returns:
+            更新后的解析结果
+        """
+        locate_value = instruction.get("locate_value", "")
+        new_content_hint = instruction.get("new_content", "")
+
+        # 构建条款摘要供 LLM 决定插入位置
+        sections_summary = "\n".join([
+            f"[{s.get('id', '?')}] {s.get('title', '无标题')}"
+            for s in sections
+        ])
+
+        system_prompt = """你是一个合同编辑专家。用户要求在合同中新增一个条款，但合同中没有找到对应的条款。
+请根据合同结构决定插入位置，并生成条款内容。
+
+输出格式要求（必须是严格有效的JSON）：
+{
+  "insert_after_clause_id": "目标条款编号（在该条款后插入）",
+  "new_clause": {
+    "id": "新条款编号",
+    "title": "条款标题",
+    "content": "条款完整内容（正式的合同语言）",
+    "level": 1
+  },
+  "confidence": 0.8
+}
+
+规则：
+1. 根据用户要求的内容，选择最合适的插入位置
+2. 例如：责任限制条款通常放在"终止"或"违约责任"之后
+3. 新条款内容要符合合同的整体风格和法律要求
+4. 只输出JSON"""
+
+        user_message = f"""合同条款结构：
+{sections_summary}
+
+用户要求新增的条款：{locate_value}
+条款内容提示：{new_content_hint or '无'}
+
+请决定插入位置并生成条款内容，只输出JSON。"""
+
+        try:
+            content = await self.chat(user_message, system_prompt)
+            result = parse_json_from_llm(content)
+
+            if isinstance(result, dict) and "new_clause" in result:
+                new_clause = result["new_clause"]
+                insert_after_id = result.get("insert_after_clause_id", "")
+                logger.info(f"LLM 生成新条款: id={new_clause.get('id')}, title={new_clause.get('title')}, content={str(new_clause.get('content', ''))[:100]}")
+
+                # 找到插入位置
+                insert_idx = len(sections)  # 默认追加到末尾
+                for i, s in enumerate(sections):
+                    if s.get("id") == insert_after_id:
+                        insert_idx = i + 1
+                        break
+
+                new_clause["modified"] = True
+                sections.insert(insert_idx, new_clause)
+                logger.info(f"新条款已插入 sections[{insert_idx}], 当前 sections 数量: {len(sections)}")
+
+                # 更新结果
+                updated_result = existing_result.copy()
+                updated_result["sections"] = sections
+                updated_result["document_info"]["sections_count"] = len(sections)
+                updated_result["updated_clause_id"] = new_clause.get("id", "new")
+
+                # 写入共享内存
+                self.write_shared("document_parser", updated_result, MemoryLayer.ANALYSIS, validate=False)
+                self.write_shared("updated_clause", new_clause, MemoryLayer.ANALYSIS, validate=False)
+
+                # 更新 CONTEXT 层的 contract_text（从 sections 重建）
+                self._update_contract_text_in_context(sections)
+
+                self.publish_event(BusinessEvent.CLAUSE_UPDATED, {
+                    "session_id": task.get("session_id"),
+                    "clause_id": new_clause.get("id", "new"),
+                    "action": "insert",
+                })
+
+                logger.info(f"新增条款完成: {new_clause.get('id')} 插入到 {insert_after_id} 之后")
+                return updated_result
+
+        except Exception as e:
+            logger.error(f"LLM新增条款失败: {e}")
+
+        return {"error": f"无法生成新条款: {locate_value}", "sections": sections}
+
+    async def _full_parse(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """全量解析（降级方案）"""
+        contract_text = self.read_shared("contract_text", MemoryLayer.CONTEXT) or ""
+        specified_type = self.read_shared("contract_type", MemoryLayer.CONTEXT)
+
+        if not contract_text:
+            return {"error": "合同文本为空"}
+
+        self.set_running(True)
+        self.update_activity()
+        try:
+            extraction_result = await self._extract_all_info(contract_text, specified_type)
+            if "error" in extraction_result:
+                return extraction_result
+            standardized = self._standardize_result(extraction_result)
+            result = {
+                "document_info": {
+                    "contract_type": standardized["contract_type"],
+                    "basic_info": standardized["basic_info"],
+                    "sections_count": len(standardized["sections"]),
+                    "text_length": len(contract_text),
+                },
+                "sections": standardized["sections"],
+                "dates": standardized["dates"],
+                "amounts": standardized["amounts"],
+                "parties": standardized["basic_info"].get("parties", []),
+                "definitions": standardized.get("definitions", []),
+            }
+            self.write_shared("document_parser", result, MemoryLayer.ANALYSIS, validate=False)
+            return result
+        finally:
+            self.set_running(False)
