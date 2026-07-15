@@ -63,6 +63,9 @@ class DocumentParserAgent(BaseAgent):
         self.chunk_overlap = chunk_overlap
         self.max_retries = max_retries
 
+        # 事件驱动：订阅 task.created 事件
+        self._subscribed_events = [BusinessEvent.TASK_CREATED]
+
         # 设置初始状态
         self.set_running(False)
 

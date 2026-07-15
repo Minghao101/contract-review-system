@@ -41,6 +41,10 @@ class RiskAssessmentAgent(BaseAgent):
             description="负责评估合同风险并提供改进建议",
             **kwargs
         )
+
+        # 事件驱动：订阅 document.parsed 事件
+        self._subscribed_events = [BusinessEvent.DOCUMENT_PARSED]
+
         logger.info(f"风险评估Agent初始化完成: {name}")
 
     def _get_cache_key(self) -> str:

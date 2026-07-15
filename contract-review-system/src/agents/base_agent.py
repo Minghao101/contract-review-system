@@ -9,10 +9,14 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 from datetime import datetime
+import asyncio
+import logging
 from langchain_core.language_models import BaseLLM
 
 from src.utils.llm_factory import get_llm
 from src.memory.memory_layer import MemoryLayer
+
+logger = logging.getLogger(__name__)
 
 
 class BaseAgent(ABC):
@@ -66,6 +70,9 @@ class BaseAgent(ABC):
         self._private_memory = None
         self._on_all_analyses_complete = None  # 聚合屏障回调
 
+        # 事件驱动：子类定义订阅的事件类型
+        self._subscribed_events: List[str] = []
+
     @property
     def wrapper(self):
         """获取LangChain Agent包装器（延迟初始化）"""
@@ -116,6 +123,11 @@ class BaseAgent(ABC):
         if self._private_memory is None:
             from src.memory.private_memory import AgentPrivateMemory
             self._private_memory = AgentPrivateMemory(self.agent_id)
+
+        # 事件驱动：自动订阅事件
+        for event_type in self._subscribed_events:
+            self._message_bus.subscribe_event(event_type, self._on_event_received)
+            logger.debug(f"[{self.agent_id}] 订阅事件: {event_type}")
 
     def read_shared(self, key: str, layer: MemoryLayer) -> Optional[Any]:
         """从共享内存读取数据"""
@@ -185,6 +197,33 @@ class BaseAgent(ABC):
             content=content,
         )
         self._message_bus.publish(msg)
+
+    def _on_event_received(self, message):
+        """
+        事件回调（同步）→ 转为异步任务执行
+
+        由 MessageBus 在 publish() 时调用。
+        """
+        event_type = message.content.get("event") if isinstance(message.content, dict) else None
+        session_id = message.content.get("session_id") if isinstance(message.content, dict) else None
+        logger.info(f"[{self.agent_id}] 收到事件: {event_type}, session={session_id}")
+        asyncio.create_task(self._handle_event(event_type, message.content))
+
+    async def _handle_event(self, event_type: str, data: Dict[str, Any]):
+        """
+        处理接收到的事件 → 调用 process()
+
+        子类可覆盖此方法实现自定义事件处理逻辑（如聚合屏障）。
+        默认行为：检查 _required_agents，不在列表中则跳过。
+        """
+        # 检查是否在所需 Agent 列表中（按需调度）
+        required = self.read_shared("_required_agents", MemoryLayer.CONTEXT)
+        if required is not None and self.agent_id not in required:
+            logger.debug(f"[{self.agent_id}] 不在 _required_agents 中，跳过")
+            return
+
+        task = {"session_id": data.get("session_id")}
+        await self.process(task)
 
     @abstractmethod
     async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:

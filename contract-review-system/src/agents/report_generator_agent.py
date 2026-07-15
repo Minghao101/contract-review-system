@@ -1,10 +1,11 @@
 """
 报告生成Agent模块 - LLM驱动，生成审查报告
 """
-from typing import Any, Dict
+from typing import Any, Dict, Set
 from datetime import datetime
 import re
 import json
+import asyncio
 import logging
 
 from src.utils.llm_response import parse_json_from_llm
@@ -42,7 +43,62 @@ class ReportGeneratorAgent(BaseAgent):
             description="负责生成合同审查报告",
             **kwargs
         )
+
+        # 事件驱动：订阅 3 个分析事件（聚合屏障）
+        self._subscribed_events = [
+            BusinessEvent.RISK_ANALYZED,
+            BusinessEvent.CLAUSE_ANALYZED,
+            BusinessEvent.COMPLIANCE_CHECKED,
+        ]
+        # Agent ID → 事件类型的映射（用于动态聚合）
+        self._agent_to_event = {
+            "risk_assessor": BusinessEvent.RISK_ANALYZED,
+            "clause_analyst": BusinessEvent.CLAUSE_ANALYZED,
+            "compliance_checker": BusinessEvent.COMPLIANCE_CHECKED,
+        }
+        self._received_events: Set[str] = set()
+        self._aggregation_lock = asyncio.Lock()
+
         logger.info(f"报告生成Agent初始化完成: {name}")
+
+    async def _handle_event(self, event_type: str, data: Dict[str, Any]):
+        """
+        聚合屏障：收到所有分析事件后才触发 process()
+
+        覆盖 BaseAgent 的默认实现，增加聚合逻辑。
+        根据 _required_agents 动态决定需要等待哪些事件。
+        """
+        async with self._aggregation_lock:
+            # 动态确定需要等待的事件（基于 _required_agents）
+            required_agents = self.read_shared("_required_agents", MemoryLayer.CONTEXT) or []
+            required_events = set()
+            for agent_id in required_agents:
+                if agent_id in self._agent_to_event:
+                    required_events.add(self._agent_to_event[agent_id])
+
+            # 如果没有设置 _required_agents，默认等待所有事件（兼容旧模式）
+            if not required_events:
+                required_events = {
+                    BusinessEvent.RISK_ANALYZED,
+                    BusinessEvent.CLAUSE_ANALYZED,
+                    BusinessEvent.COMPLIANCE_CHECKED,
+                }
+
+            self._received_events.add(event_type)
+            logger.info(
+                f"[{self.agent_id}] 聚合屏障: 收到 {event_type}, "
+                f"已收到 {len(self._received_events)}/{len(required_events)}, "
+                f"需要等待: {[e.value for e in required_events]}"
+            )
+
+            if self._received_events >= required_events:
+                # 所有分析事件已到达，触发报告生成
+                self._received_events.clear()
+                logger.info(f"[{self.agent_id}] 聚合屏障归零：所有分析完成，触发报告生成")
+                task = {"session_id": data.get("session_id")}
+                await self.process(task)
+            else:
+                logger.info(f"[{self.agent_id}] 聚合屏障: 等待剩余事件")
 
     async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """

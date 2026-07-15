@@ -96,6 +96,7 @@ class MessageBus:
 
     def __init__(self):
         self._subscribers: Dict[str, list] = {}
+        self._event_subscribers: Dict[str, list] = {}  # 按事件类型订阅
         self._message_queue: list = []
         self._event_history: list = []  # 事件历史（调试用）
 
@@ -130,16 +131,42 @@ class MessageBus:
         else:
             del self._subscribers[agent_id]
 
+    def subscribe_event(self, event_type: str, callback: Callable):
+        """
+        订阅特定事件类型（事件驱动协作的核心机制）
+
+        Args:
+            event_type: 事件类型（如 "task.created", "document.parsed"）
+            callback: 回调函数 callback(message)
+        """
+        if event_type not in self._event_subscribers:
+            self._event_subscribers[event_type] = []
+        self._event_subscribers[event_type].append(callback)
+
+    def unsubscribe_event(self, event_type: str, callback: Callable = None):
+        """取消事件类型订阅"""
+        if event_type not in self._event_subscribers:
+            return
+        if callback is not None:
+            self._event_subscribers[event_type] = [
+                cb for cb in self._event_subscribers[event_type] if cb != callback
+            ]
+            if not self._event_subscribers[event_type]:
+                del self._event_subscribers[event_type]
+        else:
+            del self._event_subscribers[event_type]
+
     def publish(self, message: AgentMessage):
         """
         同步发布消息
 
         通知所有匹配的订阅者（receiver_id 精确匹配或订阅者为 "*"）。
+        同时触发事件类型订阅者。
         """
         self._message_queue.append(message)
         self._record_event(message)
 
-        # 通知订阅者
+        # 通知 agent_id 订阅者
         for agent_id, callbacks in self._subscribers.items():
             if agent_id == message.receiver_id or agent_id == "*":
                 for callback in callbacks:
@@ -148,15 +175,26 @@ class MessageBus:
                     except Exception as e:
                         logger.error(f"消息回调失败 [{agent_id}]: {e}")
 
+        # 通知事件类型订阅者
+        event_type = message.content.get("event") if isinstance(message.content, dict) else None
+        if event_type and event_type in self._event_subscribers:
+            for callback in self._event_subscribers[event_type]:
+                try:
+                    callback(message)
+                except Exception as e:
+                    logger.error(f"事件回调失败 [{event_type}]: {e}")
+
     async def publish_async(self, message: AgentMessage):
         """
         异步发布消息
 
         用于 Agent 事件驱动协作，回调为异步函数时自动 await。
+        同时触发事件类型订阅者。
         """
         self._message_queue.append(message)
         self._record_event(message)
 
+        # 通知 agent_id 订阅者
         for agent_id, callbacks in self._subscribers.items():
             if agent_id == message.receiver_id or agent_id == "*":
                 for callback in callbacks:
@@ -167,6 +205,18 @@ class MessageBus:
                             callback(message)
                     except Exception as e:
                         logger.error(f"异步消息回调失败 [{agent_id}]: {e}")
+
+        # 通知事件类型订阅者
+        event_type = message.content.get("event") if isinstance(message.content, dict) else None
+        if event_type and event_type in self._event_subscribers:
+            for callback in self._event_subscribers[event_type]:
+                try:
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback(message)
+                    else:
+                        callback(message)
+                except Exception as e:
+                    logger.error(f"异步事件回调失败 [{event_type}]: {e}")
 
     def _record_event(self, message: AgentMessage):
         """记录事件历史（调试用）"""
@@ -203,6 +253,7 @@ class MessageBus:
     def clear(self):
         """清理所有订阅和消息（会话结束时调用）"""
         self._subscribers.clear()
+        self._event_subscribers.clear()
         self._message_queue.clear()
         self._event_history.clear()
 

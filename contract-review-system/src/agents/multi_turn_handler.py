@@ -1,12 +1,11 @@
 """
-多轮对话处理器 - 弱中心化调度器（启动协调者）
+多轮对话处理器 - 完全事件驱动调度器（启动协调者）
 
-阶段1改造后职责：
+职责：
 - 意图识别（不变）
 - 初始化共享内存 + 消息总线
-- 发布 task.created 事件启动事件链
+- 发布 task.created 事件启动事件链（Agent 自主订阅和协作）
 - 等待 task.completed 事件返回结果（asyncio.Event + 全局超时）
-- 聚合栅栏：共享内存计数器，所有分析完成后自动触发报告生成
 - 问候/追问/未知意图直接处理（不变）
 - 异常兜底：超时熔断、Agent 失败降级
 """
@@ -146,7 +145,7 @@ class MultiTurnHandler:
         self._sm_proxy = RuntimeProxy(lambda sid: self._runtimes.get(sid))
         self._bus_proxy = MessageBusProxy(lambda sid: self._runtimes.get(sid))
 
-        logger.info("多轮对话处理器初始化（弱中心化模式）")
+        logger.info("多轮对话处理器初始化（完全事件驱动模式）")
 
     def register_agent(self, agent: BaseAgent):
         """注册Agent实例"""
@@ -261,12 +260,15 @@ class MultiTurnHandler:
         runtime.shared_memory.write("coordinator", "user_message", user_message, MemoryLayer.CONTEXT, validate=False)
 
         # 10. 绑定 proxy 到所有 Agent（而非具体 SharedMemoryManager，解决 singleton 并发问题）
+        #     Agent 会自动订阅各自关心的事件
         for agent in self._agents.values():
-            agent.bind_infrastructure(
-                self._sm_proxy,
-                self._bus_proxy,
-                on_all_complete=self._make_on_complete_callback(runtime),
-            )
+            agent.bind_infrastructure(self._sm_proxy, self._bus_proxy)
+
+        # 10.1 订阅 task.completed 事件（ReportGenerator 完成后设置 completion_event）
+        def _on_task_completed(message):
+            logger.info("收到 task.completed 事件，设置 completion_event")
+            runtime.completion_event.set()
+        runtime.message_bus.subscribe_event(BusinessEvent.TASK_COMPLETED, _on_task_completed)
 
         # 11. 执行事件驱动的 Agent 协作链
         result = await self._execute_event_driven(runtime, intent.type)
@@ -293,31 +295,6 @@ class MultiTurnHandler:
         }
 
     # ==================== 事件驱动执行 ====================
-
-    def _make_on_complete_callback(self, runtime: TaskRuntime):
-        """创建聚合屏障回调闭包，捕获当前运行时"""
-        def callback():
-            logger.info("聚合屏障归零：所有分析 Agent 已完成")
-            # 设置分析完成事件
-            runtime.analysis_complete_event.set()
-            # 全量审查场景：自动触发 ReportGenerator
-            if "report_generator" in INTENT_REQUIRED_AGENTS.get(
-                IntentType(runtime.shared_memory.read("coordinator", "intent_type", MemoryLayer.CONTEXT) or ""),
-                [],
-            ):
-                asyncio.create_task(self._trigger_report_generator(runtime))
-        return callback
-
-    async def _trigger_report_generator(self, runtime: TaskRuntime):
-        """聚合屏障归零后自动触发 ReportGenerator"""
-        logger.info("触发 ReportGenerator 生成报告")
-        task = {"session_id": runtime.session_id}
-        try:
-            await self._execute_single_agent("report_generator", task)
-        except Exception as e:
-            logger.error(f"ReportGenerator 执行失败: {e}")
-        finally:
-            runtime.completion_event.set()
 
     def _init_runtime(
         self,
@@ -354,18 +331,8 @@ class MultiTurnHandler:
         shared_memory.write("coordinator", "intent_type", intent.type.value, MemoryLayer.CONTEXT)
         shared_memory.write("coordinator", "session_id", session_id, MemoryLayer.CONTEXT)
 
-        # 聚合栅栏：仅全量审查场景初始化 _pending_count
+        # 记录所需 Agent（供按需调度使用）
         required = INTENT_REQUIRED_AGENTS.get(intent.type, [])
-        if intent.type == IntentType.CONTRACT_REVIEW:
-            analysis_agents = [a for a in ["risk_assessor", "clause_analyst", "compliance_checker"] if a in required]
-            shared_memory.write(
-                "coordinator", "_pending_count", len(analysis_agents), MemoryLayer.CONTEXT,
-                validate=False,
-            )
-        else:
-            # 增量修改/单 Agent 场景：不初始化聚合栅栏，避免误触发
-            shared_memory.write("coordinator", "_pending_count", 0, MemoryLayer.CONTEXT, validate=False)
-
         shared_memory.write("coordinator", "_required_agents", required, MemoryLayer.CONTEXT, validate=False)
 
         runtime = TaskRuntime(
@@ -386,15 +353,41 @@ class MultiTurnHandler:
     async def _execute_event_driven(self, runtime: TaskRuntime, intent_type: IntentType) -> Dict[str, Any]:
         """
         执行事件驱动的 Agent 协作链（带全局超时熔断）
+
+        完全事件驱动：调度器只发布事件，Agent 自主订阅和协作。
         """
         task = {"session_id": runtime.session_id}
 
+        # 增量修改流程保持手动编排（复杂场景暂不改造）
+        if intent_type == IntentType.MODIFY_CONTRACT:
+            return await self._execute_incremental_modify(runtime, task)
+
+        # 单 Agent 意图：直接调用特定 Agent（不走完整事件链）
+        single_agent_map = {
+            IntentType.RISK_ASSESSMENT: "risk_assessor",
+            IntentType.CLAUSE_ANALYSIS: "clause_analyst",
+            IntentType.COMPLIANCE_CHECK: "compliance_checker",
+            IntentType.REPORT_GENERATION: "report_generator",
+        }
+        if intent_type in single_agent_map:
+            agent_name = single_agent_map[intent_type]
+            result = await self._execute_single_agent(agent_name, task)
+            runtime.completion_event.set()
+            return result
+
         try:
-            result = await asyncio.wait_for(
-                self._execute_by_intent(runtime, intent_type, task),
+            # 发布初始事件，Agent 自动订阅和协作
+            self._publish_event(runtime, BusinessEvent.TASK_CREATED, {
+                "session_id": runtime.session_id,
+            })
+            logger.info(f"已发布事件: {BusinessEvent.TASK_CREATED}")
+
+            # 等待 task.completed 事件（ReportGenerator 完成后发布）
+            await asyncio.wait_for(
+                runtime.completion_event.wait(),
                 timeout=_TASK_TIMEOUT,
             )
-            return result
+            return {"status": "completed"}
 
         except asyncio.TimeoutError:
             logger.error(f"任务执行超时（{_TASK_TIMEOUT}s），熔断终止")
@@ -403,92 +396,19 @@ class MultiTurnHandler:
             logger.error(f"事件驱动执行失败: {e}", exc_info=True)
             return {"error": str(e), "status": "error"}
 
-    async def _execute_by_intent(self, runtime: TaskRuntime, intent_type: IntentType, task: Dict[str, Any]) -> Dict[str, Any]:
-        """根据意图类型分发执行"""
-        if intent_type == IntentType.CONTRACT_REVIEW:
-            return await self._execute_full_review_chain(runtime, task)
-
-        elif intent_type == IntentType.MODIFY_CONTRACT:
-            return await self._execute_incremental_modify(runtime, task)
-
-        elif intent_type in (IntentType.RISK_ASSESSMENT, IntentType.CLAUSE_ANALYSIS,
-                             IntentType.COMPLIANCE_CHECK, IntentType.REPORT_GENERATION):
-            agent_map = {
-                IntentType.RISK_ASSESSMENT: "risk_assessor",
-                IntentType.CLAUSE_ANALYSIS: "clause_analyst",
-                IntentType.COMPLIANCE_CHECK: "compliance_checker",
-                IntentType.REPORT_GENERATION: "report_generator",
-            }
-            agent_name = agent_map[intent_type]
-            result = await self._execute_single_agent(agent_name, task)
-            # 单 Agent 场景：直接设置完成事件（不需要聚合栅栏）
-            runtime.completion_event.set()
-            return result
-
-        else:
-            logger.warning(f"未知意图类型: {intent_type}")
-            return {}
-
-    async def _execute_full_review_chain(self, runtime: TaskRuntime, task: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        完整审查链路（聚合栅栏驱动）
-
-        链路：
-        1. DocumentParser 执行
-        2. Risk + Clause + Compliance 并行执行
-        3. 聚合栅栏归零 → 回调自动触发 ReportGenerator
-        4. 等待 ReportGenerator 完成
-        """
-        required = runtime.shared_memory.read("coordinator", "_required_agents", MemoryLayer.CONTEXT) or []
-
-        # Step 1: 文档解析
-        if "document_parser" in required:
-            logger.info("Step 1: 文档解析")
-            parse_result = await self._execute_single_agent("document_parser", task)
-            if isinstance(parse_result, dict) and "error" in parse_result:
-                logger.warning(f"文档解析失败，跳过后续步骤: {parse_result}")
-                runtime.completion_event.set()
-                return parse_result
-
-        # Step 2: 并行执行分析 Agent（完成后通过聚合栅栏自动触发 ReportGenerator）
-        analysis_tasks = []
-        analysis_names = []
-        for agent_name in ["risk_assessor", "clause_analyst", "compliance_checker"]:
-            if agent_name in required:
-                analysis_tasks.append(self._execute_single_agent(agent_name, task))
-                analysis_names.append(agent_name)
-
-        if analysis_tasks:
-            logger.info(f"Step 2: 并行执行 {analysis_names}（等待聚合屏障归零 → 触发 ReportGenerator）")
-
-            async def _run_analysis():
-                return await asyncio.gather(*analysis_tasks, return_exceptions=True)
-
-            gather_task = asyncio.create_task(_run_analysis())
-
-            # 等待 ReportGenerator 完成（聚合栅栏归零 → 回调触发 ReportGenerator → 完成后 set completion_event）
-            try:
-                await asyncio.wait_for(
-                    runtime.completion_event.wait(),
-                    timeout=_TASK_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"审查链路等待超时（{_TASK_TIMEOUT}s）")
-                gather_task.cancel()
-
-            # 处理异常（降级）
-            if gather_task.done() and not gather_task.cancelled():
-                analysis_results = gather_task.result()
-                for agent_name, result in zip(analysis_names, analysis_results):
-                    if isinstance(result, Exception):
-                        logger.error(f"Agent {agent_name} 执行异常: {result}，标记为失败")
-
-        # 汇总所有结果
-        all_results = self._collect_results(runtime)
-        if "document_parser" in required:
-            all_results["document_parser"] = parse_result
-
-        return all_results
+    def _publish_event(self, runtime: TaskRuntime, event_type: str, data: Dict[str, Any] = None):
+        """发布事件到当前运行时的消息总线"""
+        from .communication import AgentMessage, MessageType
+        content = {"event": event_type}
+        if data:
+            content.update(data)
+        msg = AgentMessage(
+            sender_id="coordinator",
+            receiver_id="*",
+            message_type=MessageType.NOTIFICATION,
+            content=content,
+        )
+        runtime.message_bus.publish(msg)
 
     async def _execute_incremental_modify(self, runtime: TaskRuntime, task: Dict[str, Any]) -> Dict[str, Any]:
         """

@@ -41,6 +41,10 @@ class ClauseAnalysisAgent(BaseAgent):
             description="负责分析合同条款的完整性和合理性",
             **kwargs
         )
+
+        # 事件驱动：订阅 document.parsed 事件
+        self._subscribed_events = [BusinessEvent.DOCUMENT_PARSED]
+
         logger.info(f"条款分析Agent初始化完成: {name}")
 
     def _get_cache_key(self) -> str:
