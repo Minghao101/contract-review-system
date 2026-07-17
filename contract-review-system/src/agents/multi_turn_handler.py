@@ -105,6 +105,11 @@ class MessageBusProxy:
         if bus:
             bus.publish(message)
 
+    def subscribe_event(self, event_type: str, callback: Callable):
+        bus = self._get_bus()
+        if bus:
+            bus.subscribe_event(event_type, callback)
+
 
 # 意图到所需 Agent 的映射
 INTENT_REQUIRED_AGENTS = {
@@ -114,6 +119,8 @@ INTENT_REQUIRED_AGENTS = {
     IntentType.COMPLIANCE_CHECK: ["compliance_checker"],
     IntentType.REPORT_GENERATION: ["report_generator"],
     IntentType.MODIFY_CONTRACT: ["document_parser", "risk_assessor", "clause_analyst", "compliance_checker"],
+    IntentType.TOPIC_RAISE: ["risk_assessor", "clause_analyst", "compliance_checker"],
+    IntentType.TOPIC_FOLLOW_UP: ["risk_assessor", "clause_analyst", "compliance_checker"],
 }
 
 
@@ -230,6 +237,10 @@ class MultiTurnHandler:
                 "context_summary": self._get_context_summary(ctx),
             }
 
+        # 7.5 处理议题讨论意图（对话式交互）
+        if intent.type in (IntentType.TOPIC_RAISE, IntentType.TOPIC_FOLLOW_UP):
+            return await self._handle_topic(session_id, user_message, intent, contract_text, ctx)
+
         # 8. 需要 Agent 执行的意图 → 事件驱动模式
         # 检查是否需要合同文本
         requires_contract = intent.type in (
@@ -293,6 +304,381 @@ class MultiTurnHandler:
             "response": response,
             "context_summary": self._get_context_summary(ctx),
         }
+
+    # ==================== 流式处理 ====================
+
+    async def handle_message_stream(
+        self,
+        session_id: str,
+        user_message: str,
+        contract_text: Optional[str] = None,
+        file_info: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        流式处理用户消息（返回 AsyncGenerator，yield SSE 事件）
+
+        事件类型：
+        - progress: 进度更新 {"status": "...", ...}
+        - result: 最终格式化结果 {"content": "..."}
+        - error: 错误信息 {"message": "..."}
+        - done: 流结束
+        """
+        import json as _json
+
+        ctx = self.conversation_manager.get_or_create(session_id)
+        ctx.add_user_message(user_message)
+
+        if contract_text:
+            filename = "contract.txt"
+            file_type = "txt"
+            if file_info:
+                filename = file_info.get("filename", filename)
+                file_type = file_info.get("type", file_type)
+            ctx.add_uploaded_file(filename, contract_text, file_type)
+
+        # 1. 意图识别
+        yield {"event": "progress", "data": {"status": "intent_recognizing", "message": "正在识别您的意图..."}}
+        intent_context = ctx.get_intent_context()
+        intent = await self.intent_recognizer.recognize(user_message, intent_context)
+        ctx.set_current_intent(intent.type.value, intent.confidence)
+        yield {"event": "progress", "data": {"status": "intent_done", "intent": intent.type.value, "message": f"意图识别完成: {intent.type.value}"}}
+
+        # 2. 问候/追问/未知 → 流式输出 LLM 回答
+        if intent.type in (IntentType.GREETING, IntentType.QUESTION_ANSWER, IntentType.UNKNOWN):
+            if intent.type == IntentType.QUESTION_ANSWER:
+                effective_contract = contract_text or ctx.get_contract_text() or ""
+                existing_runtime = self._runtimes.get(session_id)
+                if existing_runtime:
+                    sm_contract = existing_runtime.shared_memory.read(
+                        "coordinator", "contract_text", MemoryLayer.CONTEXT
+                    )
+                    if sm_contract:
+                        effective_contract = sm_contract
+
+                yield {"event": "progress", "data": {"status": "answering", "message": "正在思考您的问题..."}}
+                # 流式 LLM 回答
+                answer = ""
+                async for chunk in self._stream_answer_from_context(user_message, ctx, effective_contract):
+                    if chunk["event"] == "chunk":
+                        answer += chunk["data"]["content"]
+                        yield chunk
+                    elif chunk["event"] == "done":
+                        pass
+                ctx.add_assistant_message(answer)
+                yield {"event": "done", "data": {}}
+            else:
+                response = self._get_direct_response(intent.type)
+                ctx.add_assistant_message(response)
+                yield {"event": "result", "data": {"content": response, "intent": intent.type.value}}
+                yield {"event": "done", "data": {}}
+            return
+
+        # 3. 议题讨论
+        if intent.type in (IntentType.TOPIC_RAISE, IntentType.TOPIC_FOLLOW_UP):
+            async for event in self._handle_topic_stream(session_id, user_message, intent, contract_text, ctx):
+                yield event
+            yield {"event": "done", "data": {}}
+            return
+
+        # 4. 需要合同文本的意图
+        requires_contract = intent.type in (
+            IntentType.CONTRACT_REVIEW, IntentType.RISK_ASSESSMENT,
+            IntentType.CLAUSE_ANALYSIS, IntentType.COMPLIANCE_CHECK,
+            IntentType.MODIFY_CONTRACT,
+        )
+        if requires_contract and not contract_text and not ctx.get_contract_text():
+            yield {"event": "result", "data": {"content": "请先上传或提供合同文本，然后我再帮您进行分析。", "needs_contract": True}}
+            yield {"event": "done", "data": {}}
+            return
+
+        # 5. Agent 执行（流式进度）
+        effective_contract = contract_text or ctx.get_contract_text() or ""
+        runtime = self._init_runtime(session_id, effective_contract, intent, file_info)
+        token = _current_session_id.set(session_id)
+        runtime.shared_memory.write("coordinator", "user_message", user_message, MemoryLayer.CONTEXT, validate=False)
+
+        for agent in self._agents.values():
+            agent.bind_infrastructure(self._sm_proxy, self._bus_proxy)
+
+        # 5.1 追踪 Agent 完成进度
+        required_agents = INTENT_REQUIRED_AGENTS.get(intent.type, [])
+        completed_agents = set()
+        _progress_queue: asyncio.Queue = asyncio.Queue()
+
+        # Agent → 完成事件映射
+        _agent_event_map = {
+            "document_parser": BusinessEvent.DOCUMENT_PARSED,
+            "risk_assessor": BusinessEvent.RISK_ANALYZED,
+            "clause_analyst": BusinessEvent.CLAUSE_ANALYZED,
+            "compliance_checker": BusinessEvent.COMPLIANCE_CHECKED,
+            "report_generator": BusinessEvent.TASK_COMPLETED,
+        }
+
+        def _make_agent_callback(agent_id):
+            def _on_done(message):
+                completed_agents.add(agent_id)
+                agent_name = self._agents[agent_id].name if agent_id in self._agents else agent_id
+                try:
+                    _progress_queue.put_nowait({
+                        "event": "progress",
+                        "data": {
+                            "status": "agent_completed",
+                            "agent": agent_id,
+                            "agent_name": agent_name,
+                            "completed": list(completed_agents),
+                            "total": len(required_agents),
+                            "message": f"{agent_name} 分析完成 ({len(completed_agents)}/{len(required_agents)})",
+                        }
+                    })
+                except Exception:
+                    pass
+            return _on_done
+
+        # 订阅各 Agent 的实际完成事件
+        for agent_id in required_agents:
+            event_type = _agent_event_map.get(agent_id)
+            if event_type and agent_id in self._agents:
+                def _make_completion_listener(aid=agent_id, evt=event_type):
+                    def _listener(message):
+                        _make_agent_callback(aid)(message)
+                    return _listener
+                runtime.message_bus.subscribe_event(event_type, _make_completion_listener(agent_id))
+
+        # 5.2 订阅 task.completed
+        def _on_task_completed(message):
+            logger.info("收到 task.completed 事件")
+            runtime.completion_event.set()
+        runtime.message_bus.subscribe_event(BusinessEvent.TASK_COMPLETED, _on_task_completed)
+
+        # 5.3 发送初始进度
+        yield {"event": "progress", "data": {
+            "status": "agents_starting",
+            "agents": required_agents,
+            "message": f"开始分析，共 {len(required_agents)} 个分析任务...",
+        }}
+
+        # 5.4 执行 Agent 并实时推送进度
+        task = {"session_id": runtime.session_id}
+        exec_task = asyncio.create_task(self._execute_event_driven(runtime, intent.type))
+
+        # 等待完成，期间推送进度
+        while not exec_task.done():
+            try:
+                progress = await asyncio.wait_for(_progress_queue.get(), timeout=2.0)
+                yield progress
+            except asyncio.TimeoutError:
+                if exec_task.done():
+                    break
+                # 发送心跳
+                yield {"event": "progress", "data": {
+                    "status": "processing",
+                    "completed": list(completed_agents),
+                    "total": len(required_agents),
+                    "message": f"分析进行中... ({len(completed_agents)}/{len(required_agents)} 完成)",
+                }}
+
+        # 处理剩余进度
+        while not _progress_queue.empty():
+            try:
+                yield _progress_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        # 获取结果
+        try:
+            final_result = exec_task.result()
+            logger.info(f"Agent 执行完成: {final_result}")
+        except Exception as e:
+            logger.error(f"Agent 执行异常: {e}", exc_info=True)
+            yield {"event": "error", "data": {"message": f"Agent 执行失败: {str(e)}"}}
+            _current_session_id.reset(token)
+            yield {"event": "done", "data": {}}
+            return
+
+        # 6. 收集结果
+        all_results = self._collect_results(runtime)
+        logger.info(f"收集到结果: {list(all_results.keys())}")
+        for agent_name, agent_result in all_results.items():
+            ctx.set_agent_result(agent_name, agent_result)
+
+        # 7. 格式化结果
+        formatted = self._format_stream_result_text(intent.type, all_results, ctx)
+        logger.info(f"格式化结果长度: {len(formatted) if formatted else 0}")
+
+        # 如果结果为空，提供默认回复
+        if not formatted or len(formatted.strip()) == 0:
+            formatted = f"分析完成，但未生成具体结果。请尝试更具体的问题。"
+
+        _current_session_id.reset(token)
+        ctx.add_assistant_message(formatted)
+
+        yield {"event": "progress", "data": {"status": "completed", "message": "分析完成"}}
+        yield {"event": "result", "data": {"content": formatted, "intent": intent.type.value}}
+        yield {"event": "done", "data": {}}
+
+    async def _stream_answer_from_context(
+        self,
+        user_message: str,
+        ctx: ConversationContext,
+        contract_text_override: Optional[str] = None,
+    ):
+        """流式回答用户问题（逐 token 输出）"""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        messages = ctx.get_messages()
+        if not messages:
+            yield {"event": "result", "data": {"content": "目前还没有进行过对话。请先上传合同文件。"}}
+            yield {"event": "done", "data": {}}
+            return
+
+        context_parts = []
+        contract_text = contract_text_override or ctx.get_contract_text()
+        if contract_text:
+            truncated = contract_text[:15000] if len(contract_text) > 15000 else contract_text
+            context_parts.append(f"=== 合同内容 ===\n{truncated}")
+
+        context_parts.append("\n=== 对话历史 ===")
+        for msg in messages:
+            role = "用户" if msg["role"] == "user" else "助手"
+            context_parts.append(f"{role}: {msg['content'][:500]}")
+
+        context_str = "\n".join(context_parts)
+
+        try:
+            llm = get_llm()
+            llm_messages = [
+                SystemMessage(content="""你是一个合同审查助手。用户之前已经对合同进行了分析，现在在追问细节。
+
+规则：
+1. 仔细阅读合同全文内容，找到与用户问题相关的条款
+2. 对话历史中助手的回复包含了之前的分析结果，可直接引用
+3. 如果合同中有明确条款回答用户问题，必须引用具体条款内容
+4. 回答要简洁明了，直接回答问题
+5. 只有在合同全文中确实找不到相关信息时才说"未发现"
+6. 如果合同被修改过（如新增条款），修改后的内容在合同文本中可以找到"""),
+                HumanMessage(content=f"""{context_str}
+
+用户问题：{user_message}""")
+            ]
+
+            # 使用流式调用
+            async for chunk in llm.astream(llm_messages):
+                if hasattr(chunk, 'content') and chunk.content:
+                    content = chunk.content
+                    if isinstance(content, list):
+                        text_parts = [block.get("text", "") for block in content
+                                      if isinstance(block, dict) and block.get("type") == "text"]
+                        content = "\n".join(text_parts)
+                    if content:
+                        yield {"event": "chunk", "data": {"content": content}}
+
+        except Exception as e:
+            logger.error(f"流式回答失败: {e}", exc_info=True)
+            yield {"event": "chunk", "data": {"content": f"抱歉，回答问题时出现错误: {str(e)}"}}
+
+        yield {"event": "done", "data": {}}
+
+    async def _handle_topic_stream(
+        self,
+        session_id: str,
+        user_message: str,
+        intent: Intent,
+        contract_text: Optional[str],
+        ctx: ConversationContext,
+    ):
+        """流式议题讨论"""
+        from src.memory.topic_board import TopicBoard, TopicResponse
+
+        effective_contract = contract_text or ctx.get_contract_text()
+        if not effective_contract:
+            yield {"event": "result", "data": {"content": "请先上传合同文本。"}}
+            return
+
+        if session_id not in self._runtimes:
+            self._init_runtime(session_id, effective_contract, intent)
+        token = _current_session_id.set(session_id)
+        runtime = self._runtimes[session_id]
+
+        try:
+            board_data = runtime.shared_memory.read("coordinator", "topic_board", MemoryLayer.CONTEXT)
+            board = TopicBoard.from_dict(board_data) if board_data else TopicBoard()
+
+            parent_id = None
+            if intent.type == IntentType.TOPIC_FOLLOW_UP:
+                latest = board.get_latest_topic()
+                if latest:
+                    parent_id = latest.id
+
+            topic = board.create_topic(user_message, raised_by="user", parent_id=parent_id)
+            participants = self._select_topic_participants(user_message)
+
+            yield {"event": "progress", "data": {"status": "topic_discussing", "message": f"议题讨论开始，{len(participants)} 位专家参与..."}}
+
+            for agent in self._agents.values():
+                agent.bind_infrastructure(self._sm_proxy, self._bus_proxy)
+
+            tasks = []
+            agent_names = []
+            for agent_id in participants:
+                if agent_id in self._agents:
+                    tasks.append(self._agents[agent_id].discuss_topic(topic))
+                    agent_names.append(agent_id)
+
+            # 简单并行执行
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            valid_responses = []
+            for resp in results:
+                if isinstance(resp, TopicResponse):
+                    board.add_response(topic.id, resp)
+                    valid_responses.append(resp)
+
+            yield {"event": "progress", "data": {"status": "topic_concluding", "message": "正在综合各方意见..."}}
+
+            conclusion = await self._generate_topic_conclusion(topic, valid_responses)
+            board.resolve_topic(topic.id, conclusion)
+
+            runtime.shared_memory.write("coordinator", "topic_board", board.to_dict(), MemoryLayer.CONTEXT, validate=False)
+
+            response = self._format_topic_response(topic, valid_responses, conclusion)
+            ctx.add_assistant_message(response)
+
+            yield {"event": "result", "data": {"content": response, "intent": intent.type.value}}
+
+        finally:
+            _current_session_id.reset(token)
+
+    def _format_stream_result_text(self, intent_type: IntentType, results: Dict[str, Any], ctx: ConversationContext) -> str:
+        """格式化流式结果为文本 — 对 CONTRACT_REVIEW 使用详细格式"""
+        if intent_type == IntentType.CONTRACT_REVIEW:
+            from src.api.routes import _format_stream_result
+            # 扁平化 Agent 结果为前端可用的格式
+            flat = self._flatten_results_for_display(results)
+            return _format_stream_result(flat)
+        return self._format_response(intent_type, results, ctx)
+
+    def _flatten_results_for_display(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        """将 Agent 结果扁平化为前端可直接使用的格式"""
+        flat = {}
+        # 这些字段来自多个 Agent，需要合并而非覆盖
+        _merge_keys = {"missing_clauses", "risks", "recommendations"}
+        for agent_name, agent_data in results.items():
+            if not isinstance(agent_data, dict):
+                continue
+            # 提取实际数据（兼容 {status, result: {...}} 和直接 {...} 两种格式）
+            actual = agent_data.get("result", agent_data) if "result" in agent_data else agent_data
+            if not isinstance(actual, dict):
+                continue
+            for k, v in actual.items():
+                if k in _merge_keys and k in flat and isinstance(flat[k], list) and isinstance(v, list):
+                    flat[k].extend(v)
+                else:
+                    flat[k] = v
+        # 保留 risk_level 等顶层 key
+        for key in ("risk_level", "status"):
+            if key in results:
+                flat[key] = results[key]
+        return flat
 
     # ==================== 事件驱动执行 ====================
 
@@ -519,6 +905,217 @@ class MultiTurnHandler:
 
         return None
 
+    # ==================== 议题讨论 ====================
+
+    async def _handle_topic(
+        self,
+        session_id: str,
+        user_message: str,
+        intent: Intent,
+        contract_text: Optional[str],
+        ctx: ConversationContext,
+    ) -> Dict[str, Any]:
+        """
+        处理议题讨论意图
+
+        流程：
+        1. 获取或创建 TopicBoard
+        2. 创建议题（TOPIC_RAISE）或找到父议题（TOPIC_FOLLOW_UP）
+        3. 选择参与 Agent
+        4. 并行调用各 Agent 的 discuss_topic()
+        5. 生成综合结论
+        6. 返回格式化结果
+        """
+        from src.memory.topic_board import TopicBoard, TopicResponse
+
+        effective_contract = contract_text or ctx.get_contract_text()
+        if not effective_contract:
+            response = "请先上传合同文本，然后我才能帮您讨论具体问题。"
+            ctx.add_assistant_message(response)
+            return {
+                "session_id": session_id,
+                "intent": intent.to_dict(),
+                "agents": [],
+                "result": None,
+                "response": response,
+            }
+
+        # 确保有 runtime（用于 SharedMemory）
+        if session_id not in self._runtimes:
+            self._init_runtime(session_id, effective_contract, intent)
+        token = _current_session_id.set(session_id)
+        runtime = self._runtimes[session_id]
+
+        try:
+            # 1. 获取或创建 TopicBoard
+            board_data = runtime.shared_memory.read("coordinator", "topic_board", MemoryLayer.CONTEXT)
+            if board_data and isinstance(board_data, dict):
+                board = TopicBoard.from_dict(board_data)
+            else:
+                board = TopicBoard()
+
+            # 2. 创建议题
+            parent_id = None
+            if intent.type == IntentType.TOPIC_FOLLOW_UP:
+                latest = board.get_latest_topic()
+                if latest:
+                    parent_id = latest.id
+
+            topic = board.create_topic(user_message, raised_by="user", parent_id=parent_id)
+
+            # 3. 选择参与 Agent
+            participants = self._select_topic_participants(user_message)
+            logger.info(f"议题讨论: topic={topic.id}, participants={participants}")
+
+            # 4. 绑定 proxy 并并行调用 discuss_topic
+            for agent in self._agents.values():
+                agent.bind_infrastructure(self._sm_proxy, self._bus_proxy)
+
+            tasks = []
+            agent_names = []
+            for agent_id in participants:
+                if agent_id in self._agents:
+                    agent = self._agents[agent_id]
+                    tasks.append(agent.discuss_topic(topic))
+                    agent_names.append(agent_id)
+
+            responses = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # 5. 收集有效回应
+            valid_responses = []
+            for resp in responses:
+                if isinstance(resp, TopicResponse):
+                    board.add_response(topic.id, resp)
+                    valid_responses.append(resp)
+                elif isinstance(resp, Exception):
+                    logger.error(f"Agent 讨论异常: {resp}")
+
+            # 6. 生成综合结论
+            conclusion = await self._generate_topic_conclusion(topic, valid_responses)
+            board.resolve_topic(topic.id, conclusion)
+
+            # 7. 持久化 TopicBoard 到 SharedMemory
+            runtime.shared_memory.write(
+                "coordinator", "topic_board", board.to_dict(),
+                MemoryLayer.CONTEXT, validate=False,
+            )
+
+            # 8. 格式化回复
+            response = self._format_topic_response(topic, valid_responses, conclusion)
+            ctx.add_assistant_message(response)
+
+            return {
+                "session_id": session_id,
+                "intent": intent.to_dict(),
+                "agents": agent_names,
+                "result": {"topic": topic.to_dict()},
+                "response": response,
+            }
+
+        finally:
+            _current_session_id.reset(token)
+
+    def _select_topic_participants(self, user_message: str) -> List[str]:
+        """
+        根据用户问题中的关键词选择参与讨论的 Agent
+
+        默认三个分析 Agent 都参与，但可以根据关键词优化
+        """
+        message_lower = user_message.lower()
+
+        # 关键词映射
+        keyword_map = {
+            "risk_assessor": ["风险", "赔偿", "违约金", "损失", "责任", "担保", "抵押"],
+            "clause_analyst": ["条款", "措辞", "歧义", "定义", "解释", "表述", "用语"],
+            "compliance_checker": ["合规", "合法", "法律", "法规", "规定", "强制性", "效力"],
+        }
+
+        # 检查关键词匹配
+        matched = set()
+        for agent_id, keywords in keyword_map.items():
+            for kw in keywords:
+                if kw in message_lower:
+                    matched.add(agent_id)
+                    break
+
+        # 默认：所有分析 Agent 都参与
+        if not matched:
+            return ["risk_assessor", "clause_analyst", "compliance_checker"]
+
+        return list(matched)
+
+    async def _generate_topic_conclusion(
+        self, topic, responses: List
+    ) -> str:
+        """用 LLM 综合各 Agent 的观点，生成结论"""
+        if not responses:
+            return "暂无分析意见。"
+
+        try:
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            opinions_text = ""
+            for resp in responses:
+                opinions_text += f"\n**{resp.agent_name}** (置信度: {resp.confidence}):\n{resp.opinion}\n"
+                if resp.references:
+                    opinions_text += f"  引用: {', '.join(resp.references)}\n"
+
+            llm = get_llm()
+            messages = [
+                SystemMessage(content="""你是一个合同审查总监。多个审查专家针对用户的问题给出了各自的专业意见。
+请综合各方观点，给出一个清晰的结论。
+
+结论应包含：
+1. 共识点（各专家一致同意的观点）
+2. 分歧点（如果有不同意见）
+3. 综合建议
+
+结论要简洁明了，直接回答用户的问题。"""),
+                HumanMessage(content=f"""议题：{topic.content}
+
+各方意见：{opinions_text}
+
+请给出综合结论："""),
+            ]
+
+            response = await llm.ainvoke(messages)
+            return response.content
+
+        except Exception as e:
+            logger.error(f"生成议题结论失败: {e}")
+            return "综合分析完成，但生成结论时出现错误。请参考上方各专家的意见。"
+
+    def _format_topic_response(
+        self, topic, responses: List, conclusion: str
+    ) -> str:
+        """格式化议题讨论结果"""
+        lines = [f"## 💬 议题讨论: {topic.title}\n"]
+
+        # 各 Agent 的观点
+        agent_icons = {
+            "risk_assessor": "🔴",
+            "clause_analyst": "📝",
+            "compliance_checker": "✅",
+        }
+
+        for resp in responses:
+            icon = agent_icons.get(resp.agent_id, "🤖")
+            conf_bar = "●" * int(resp.confidence * 5) + "○" * (5 - int(resp.confidence * 5))
+            lines.append(f"### {icon} {resp.agent_name}")
+            lines.append(f"置信度: {conf_bar} ({resp.confidence:.0%})\n")
+            lines.append(resp.opinion)
+            if resp.references:
+                lines.append(f"\n📎 引用: {', '.join(resp.references)}")
+            lines.append("")
+
+        # 综合结论
+        if conclusion:
+            lines.append("---\n")
+            lines.append("### 📋 综合结论\n")
+            lines.append(conclusion)
+
+        return "\n".join(lines)
+
     async def _execute_single_agent(self, agent_name: str, task: Dict[str, Any]) -> Dict[str, Any]:
         """
         执行单个 Agent（全链路容错）
@@ -533,9 +1130,9 @@ class MultiTurnHandler:
 
         agent = self._agents[agent_name]
         try:
-            logger.info(f"开始执行 Agent: {agent_name}")
+            logger.info(f"开始执行 Agent: {agent_name}, task keys: {list(task.keys())}")
             result = await agent.process(task)
-            logger.info(f"Agent 执行完成: {agent_name}")
+            logger.info(f"Agent 执行完成: {agent_name}, result type: {type(result)}, keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
             return result
         except Exception as e:
             logger.error(f"Agent 执行失败: {agent_name} - {e}", exc_info=True)

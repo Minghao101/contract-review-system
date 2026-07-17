@@ -88,7 +88,7 @@ class ReportGeneratorAgent(BaseAgent):
             logger.info(
                 f"[{self.agent_id}] 聚合屏障: 收到 {event_type}, "
                 f"已收到 {len(self._received_events)}/{len(required_events)}, "
-                f"需要等待: {[e.value for e in required_events]}"
+                f"需要等待: {list(required_events)}"
             )
 
             if self._received_events >= required_events:

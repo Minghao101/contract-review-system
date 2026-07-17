@@ -238,6 +238,87 @@ class BaseAgent(ABC):
         """
         pass
 
+    async def discuss_topic(self, topic) -> "TopicResponse":
+        """
+        参与议题讨论（默认实现，子类可覆盖以提供更专业的分析）
+
+        Args:
+            topic: Topic 实例
+
+        Returns:
+            TopicResponse 实例
+        """
+        from src.memory.topic_board import TopicResponse
+        from src.utils.llm_factory import get_llm
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        contract_text = self.read_shared("contract_text", MemoryLayer.CONTEXT) or ""
+
+        # 构建角色特定的 prompt
+        role_prompt = self._get_topic_role_prompt()
+
+        system_content = f"""你是一个合同审查专家，你的专业角色是：{self.role}。
+
+{role_prompt}
+
+用户发起以下议题，请从你的专业角度给出分析意见。
+
+规则：
+1. 基于合同文本内容进行分析，引用具体条款
+2. 给出明确的观点（合理/不合理/有风险/建议修改等）
+3. 如果涉及法律条款，引用相关法规
+4. 置信度根据分析的确定性打分（0.0-1.0）
+5. 回复格式为JSON：{{"opinion": "你的观点", "confidence": 0.8, "references": ["引用的条款或法规"]}}"""
+
+        truncated = contract_text[:12000] if len(contract_text) > 12000 else contract_text
+        user_content = f"""合同内容：
+{truncated}
+
+议题：{topic.content}"""
+
+        try:
+            llm = get_llm()
+            messages = [
+                SystemMessage(content=system_content),
+                HumanMessage(content=user_content),
+            ]
+            response = await llm.ainvoke(messages)
+            content = response.content
+
+            # 尝试解析 JSON
+            import json
+            import re
+            json_match = re.search(r'\{[^{}]*"opinion"[^{}]*\}', content, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group())
+            else:
+                result = {
+                    "opinion": content[:500],
+                    "confidence": 0.7,
+                    "references": [],
+                }
+
+            return TopicResponse(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                opinion=result.get("opinion", content[:500]),
+                confidence=result.get("confidence", 0.7),
+                references=result.get("references", []),
+            )
+        except Exception as e:
+            logger.error(f"[{self.agent_id}] 议题讨论失败: {e}")
+            return TopicResponse(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                opinion=f"分析过程中出现错误: {str(e)}",
+                confidence=0.0,
+                references=[],
+            )
+
+    def _get_topic_role_prompt(self) -> str:
+        """获取角色特定的议题讨论 prompt（子类可覆盖）"""
+        return f"你是{self.name}，负责{self.role}。请从你的专业角度分析议题。"
+
     def update_activity(self):
         """更新Agent活跃时间"""
         self.last_active_at = datetime.now()

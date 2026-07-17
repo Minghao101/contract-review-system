@@ -39,23 +39,25 @@ class LLMFactory:
             raise ValueError(f"不支持的LLM提供商: {provider}")
 
     def _create_anthropic_llm(self) -> BaseLLM:
-        """创建Anthropic/MIMO模型实例"""
-        return ChatAnthropic(
+        """创建Anthropic/MIMO模型实例（关闭思考模式）"""
+        return ChatOpenAI(
             model=self.settings.LLM_MODEL,
             api_key=self.settings.LLM_API_KEY,
             base_url=self.settings.LLM_API_BASE,
             temperature=self.settings.LLM_TEMPERATURE,
             max_tokens=self.settings.LLM_MAX_TOKENS,
-            thinking={"type": "disabled"},
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
 
     def _create_openai_llm(self) -> BaseLLM:
-        """创建OpenAI模型实例"""
+        """创建OpenAI/MIMO模型实例（关闭思考模式）"""
         return ChatOpenAI(
             model=self.settings.LLM_MODEL,
             api_key=self.settings.LLM_API_KEY,
+            base_url=self.settings.LLM_API_BASE,
             temperature=self.settings.LLM_TEMPERATURE,
             max_tokens=self.settings.LLM_MAX_TOKENS,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
 
     def _create_ollama_llm(self) -> BaseLLM:

@@ -220,61 +220,25 @@ def _query_memory(query: str):
 
 
 def _process_with_backend(contract_text: str, question: str, file_name: str):
-    """调用后端处理 - 支持流式输出"""
-    with st.spinner("🔄 正在分析..."):
-        try:
-            response = requests.post(
-                f"{API_BASE_URL}/review/stream",
-                json={
-                    "contract_text": contract_text,
-                    "contract_type": "general",
-                    "review_focus": [question],
-                    "contract_name": file_name,
-                    "session_id": st.session_state.get("session_id")
-                },
-                timeout=300,
-                stream=True
-            )
+    """调用后端处理 - SSE 流式输出"""
+    try:
+        import json as _json
 
-            if response.status_code == 200:
-                # 读取流式响应的完整文本
-                full_text = response.text
+        response = requests.post(
+            f"{API_BASE_URL}/review/stream_sse",
+            json={
+                "contract_text": contract_text,
+                "contract_type": "general",
+                "review_focus": [question],
+                "contract_name": file_name,
+                "session_id": st.session_state.get("session_id")
+            },
+            timeout=300,
+            stream=True
+        )
 
-                st.session_state["review_result"] = {"raw_text": full_text}
-
-                # 保存到历史记录
-                if "review_history" not in st.session_state:
-                    st.session_state["review_history"] = []
-                st.session_state["review_history"].append({
-                    "contract_name": file_name,
-                    "status": "completed",
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "result": {"raw_text": full_text},
-                    "question": question
-                })
-
-                # 流式输出
-                _stream_answer(full_text)
-
-                return
-            else:
-                error_msg = f"❌ 后端错误: {response.status_code}"
-                with st.chat_message("assistant", avatar="🤖"):
-                    st.markdown(error_msg)
-                st.session_state["messages"].append({
-                    "role": "assistant",
-                    "content": error_msg,
-                    "timestamp": datetime.now().strftime("%H:%M:%S")
-                })
-                idx = len(st.session_state["messages"]) - 1
-                st.session_state.setdefault("_displayed_indices", set()).add(idx)
-
-        except requests.exceptions.ConnectionError:
-            error_msg = (
-                "❌ 无法连接到后端服务，请确认 FastAPI 已启动。\n\n"
-                "```\n.venv\\Scripts\\python.exe -m uvicorn src.api.main:app "
-                "--host 0.0.0.0 --port 8001\n```"
-            )
+        if response.status_code != 200:
+            error_msg = f"❌ 后端错误: {response.status_code}"
             with st.chat_message("assistant", avatar="🤖"):
                 st.markdown(error_msg)
             st.session_state["messages"].append({
@@ -284,20 +248,112 @@ def _process_with_backend(contract_text: str, question: str, file_name: str):
             })
             idx = len(st.session_state["messages"]) - 1
             st.session_state.setdefault("_displayed_indices", set()).add(idx)
-        except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            logger.error(f"处理失败: {e}\n{tb}")
-            error_msg = f"❌ 处理失败: {str(e)}\n\n```\n{tb[-500:]}\n```"
-            with st.chat_message("assistant", avatar="🤖"):
-                st.markdown(error_msg)
+            return
+
+        # 解析 SSE 事件流
+        status_placeholder = st.empty()
+        result_content = ""
+        current_event = None
+
+        with st.chat_message("assistant", avatar="🤖"):
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+
+                if line.startswith("event: "):
+                    current_event = line[7:].strip()
+                elif line.startswith("data: "):
+                    data_str = line[6:]
+                    try:
+                        data = _json.loads(data_str)
+                    except Exception:
+                        continue
+
+                    if current_event == "progress":
+                        msg = data.get("message", "")
+                        status = data.get("status", "")
+                        # 显示进度
+                        if status in ("intent_recognizing", "intent_done", "agents_starting",
+                                      "answering", "topic_discussing", "topic_agent_done",
+                                      "topic_concluding", "processing"):
+                            status_placeholder.caption(f"🔄 {msg}")
+
+                    elif current_event == "chunk":
+                        # 逐 token 流式输出（追问场景）
+                        content = data.get("content", "")
+                        if content:
+                            result_content += content
+                            status_placeholder.empty()
+                            st.markdown(result_content)
+
+                    elif current_event == "result":
+                        # 最终结果
+                        content = data.get("content", "")
+                        if content:
+                            result_content = content
+                            status_placeholder.empty()
+                            st.markdown(content)
+
+                    elif current_event == "error":
+                        msg = data.get("message", "未知错误")
+                        status_placeholder.empty()
+                        st.error(f"❌ {msg}")
+                        result_content = f"❌ {msg}"
+
+                    elif current_event == "done":
+                        break
+
+        # 保存到 session state
+        if result_content:
+            st.session_state["review_result"] = {"raw_text": result_content}
+
+            if "review_history" not in st.session_state:
+                st.session_state["review_history"] = []
+            st.session_state["review_history"].append({
+                "contract_name": file_name,
+                "status": "completed",
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result": {"raw_text": result_content},
+                "question": question
+            })
+
             st.session_state["messages"].append({
                 "role": "assistant",
-                "content": error_msg,
+                "content": result_content,
                 "timestamp": datetime.now().strftime("%H:%M:%S")
             })
             idx = len(st.session_state["messages"]) - 1
             st.session_state.setdefault("_displayed_indices", set()).add(idx)
+
+    except requests.exceptions.ConnectionError:
+        error_msg = (
+            "❌ 无法连接到后端服务，请确认 FastAPI 已启动。\n\n"
+            "```\n.venv\\Scripts\\python.exe -m uvicorn src.api.main:app "
+            "--host 0.0.0.0 --port 8001\n```"
+        )
+        with st.chat_message("assistant", avatar="🤖"):
+            st.markdown(error_msg)
+        st.session_state["messages"].append({
+            "role": "assistant",
+            "content": error_msg,
+            "timestamp": datetime.now().strftime("%H:%M:%S")
+        })
+        idx = len(st.session_state["messages"]) - 1
+        st.session_state.setdefault("_displayed_indices", set()).add(idx)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"处理失败: {e}\n{tb}")
+        error_msg = f"❌ 处理失败: {str(e)}\n\n```\n{tb[-500:]}\n```"
+        with st.chat_message("assistant", avatar="🤖"):
+            st.markdown(error_msg)
+        st.session_state["messages"].append({
+            "role": "assistant",
+            "content": error_msg,
+            "timestamp": datetime.now().strftime("%H:%M:%S")
+        })
+        idx = len(st.session_state["messages"]) - 1
+        st.session_state.setdefault("_displayed_indices", set()).add(idx)
 
 
 def _stream_answer(answer: str):

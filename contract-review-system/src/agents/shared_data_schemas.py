@@ -67,6 +67,11 @@ class ModifyInstruction(BaseModel):
     confidence: float = Field(default=0.8, ge=0.0, le=1.0, description="定位置信度")
 
 
+class TopicData(BaseModel):
+    """议题讨论数据（写入 SharedMemory CONTEXT 层）"""
+    topics: List[Dict[str, Any]] = Field(default_factory=list, description="议题列表")
+
+
 # 共享内存 Schema 注册表：key → Schema 类（key 与 agent_id 一致）
 SHARED_DATA_SCHEMAS: Dict[str, type] = {
     "document_parser": DocumentParseResult,
@@ -75,6 +80,7 @@ SHARED_DATA_SCHEMAS: Dict[str, type] = {
     "compliance_checker": ComplianceCheckResult,
     "report_generator": ReportResult,
     "modify_instruction": ModifyInstruction,
+    "topic_board": TopicData,
 }
 
 

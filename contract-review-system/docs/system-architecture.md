@@ -222,8 +222,7 @@ async def _recognize_by_function_calling(self, text, context):
 
 ---
 
-## 7. MultiTurnHandler — 启动协调者
-
+## 7. MultiTurnHandler — 启动协
 阶段1改造后，调度器退化为启动协调者，只保留三个核心职责：
 
 ### 职责

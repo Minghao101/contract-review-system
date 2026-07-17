@@ -282,6 +282,47 @@ class TaskManager:
 
         return flat_result
 
+    async def process_stream(
+        self,
+        contract_text: str,
+        contract_type: str = "general",
+        review_focus: list = None,
+        contract_name: str = "未命名合同",
+        session_id: str = None,
+    ):
+        """
+        流式处理任务（返回 AsyncGenerator，yield SSE 事件）
+
+        用法：
+            async for event in task_manager.process_stream(...):
+                print(event)  # {"event": "progress/result/done", "data": {...}}
+        """
+        if not session_id:
+            session_id = f"sync_{contract_name}_{uuid.uuid4().hex[:8]}"
+
+        async for event in self._handler.handle_message_stream(
+            session_id=session_id,
+            user_message=review_focus[0] if review_focus else "审查合同",
+            contract_text=contract_text,
+            file_info={"contract_type": contract_type},
+        ):
+            # 在最终结果返回时保存到长期记忆
+            if event.get("event") == "result":
+                try:
+                    from src.memory.long_term_memory import get_long_term_memory
+                    memory = get_long_term_memory()
+                    content = event.get("data", {}).get("content", "")
+                    memory.save_review_memory(
+                        contract_name=contract_name,
+                        contract_text=contract_text,
+                        result={"response": content, "status": "completed"},
+                    )
+                    logger.info(f"已保存审查记忆: {contract_name}")
+                except Exception as e:
+                    logger.warning(f"保存审查记忆失败: {e}")
+
+            yield event
+
     def _flatten_agent_results(self, handler_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         将MultiTurnHandler的嵌套结果扁平化为前端可直接使用的格式

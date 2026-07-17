@@ -3,9 +3,10 @@ API路由模块
 """
 from typing import Optional
 from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 import logging
+import json
 
 from .task_manager import get_task_manager
 from .document_parser import DocumentParser
@@ -138,7 +139,7 @@ def _format_stream_result(result: dict, review_focus: list = None) -> str:
             response = str(response)
         # intent type 存在 result["status"] 中（_flatten_agent_results 写入）
         intent_type = result.get("status", "")
-        if intent_type in ("modify_contract", "question_answer", "greeting", "unknown"):
+        if intent_type in ("modify_contract", "question_answer", "greeting", "unknown", "topic_raise", "topic_follow_up"):
             return response
         # 非全量审查意图：也直接返回 response
         if intent_type and intent_type != "contract_review":
@@ -158,30 +159,151 @@ def _format_stream_result(result: dict, review_focus: list = None) -> str:
                 lines.append(f"**当事方**: {', '.join(str(p) for p in bi['parties'])}")
         lines.append("")
 
+    # ==================== 风险评估（RiskAssessmentResult） ====================
     if result.get("risks"):
         lines.append("### ⚠️ 风险评估")
+        risk_level = result.get("risk_level", "")
+        if risk_level:
+            level_label = {"critical": "严重", "high": "高", "medium": "中", "low": "低"}.get(risk_level, risk_level)
+            lines.append(f"**整体风险等级**: {level_label}")
         for r in result["risks"]:
             if isinstance(r, dict):
                 level = r.get("level", r.get("severity", "medium"))
                 emoji = {"high": "🔴", "critical": "🔴", "medium": "🟡", "low": "🟢"}.get(level, "⚪")
                 title = r.get("title", r.get("name", "风险"))
-                desc = str(r.get("description", ""))[:150]
+                desc = str(r.get("description", ""))[:200]
                 lines.append(f"- {emoji} **{title}**: {desc}")
+        # 量化评分
+        quant = result.get("risk_quantification", {})
+        if quant:
+            lines.append("")
+            lines.append("**风险量化:**")
+            score_val = quant.get("risk_score", "")
+            if score_val:
+                lines.append(f"- 综合风险分: {score_val}/100")
+            dist = quant.get("risk_distribution", {})
+            if dist and isinstance(dist, dict):
+                parts = []
+                for level in ("high", "medium", "low"):
+                    if dist.get(level, 0) > 0:
+                        parts.append(f"{level}: {dist[level]}")
+                if parts:
+                    lines.append(f"- 风险分布: {', '.join(parts)}")
+            total = quant.get("total_risks", "")
+            if total:
+                lines.append(f"- 风险总数: {total}")
+        # 缓解计划
+        mitigation = result.get("mitigation_plan", [])
+        if mitigation:
+            lines.append("")
+            lines.append("**缓解计划:**")
+            for plan in mitigation:
+                if isinstance(plan, dict):
+                    risk_name = plan.get("risk_name", "")
+                    severity = plan.get("severity", "")
+                    mitigation_text = plan.get("mitigation", plan.get("suggestion", ""))
+                    emoji = {"high": "🔴", "critical": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
+                    lines.append(f"- {emoji} **{risk_name}**: {mitigation_text}")
         lines.append("")
 
-    if result.get("compliance_violations"):
-        lines.append("### ✅ 合规问题")
-        for v in result["compliance_violations"]:
-            desc = v.get("description", v.get("issue", str(v))) if isinstance(v, dict) else str(v)
-            lines.append(f"- ⚠️ {desc}")
+    # ==================== 条款分析（ClauseAnalysisResult） ====================
+    analysis = result.get("analysis", {})
+    if analysis or result.get("issues"):
+        lines.append("### 📝 条款分析")
+        # 完整性评分
+        completeness = analysis.get("completeness", {})
+        score = completeness.get("completeness_score", 0)
+        if score:
+            lines.append(f"**完整性评分**: {int(score * 100)}/100")
+            missing = completeness.get("missing_clauses", [])
+            if missing:
+                lines.append(f"**缺失必备条款**: {', '.join(missing)}")
+        # 模糊条款
+        ambiguous = analysis.get("ambiguous_clauses", [])
+        if ambiguous:
+            lines.append("")
+            lines.append("**模糊条款:**")
+            for item in ambiguous:
+                if isinstance(item, dict):
+                    issue_type = item.get("issue_type", "问题")
+                    content = str(item.get("content", ""))[:150]
+                    suggestion = item.get("suggestion", "")
+                    lines.append(f"- **{issue_type}**: {content}")
+                    if suggestion:
+                        lines.append(f"  建议: {suggestion}")
+        # issues_found
+        issues = result.get("issues", [])
+        if issues:
+            lines.append("")
+            lines.append("**条款问题:**")
+            for item in issues:
+                if isinstance(item, dict):
+                    issue_type = item.get("type", item.get("title", item.get("name", "问题")))
+                    severity = item.get("severity", "")
+                    message = item.get("message", item.get("description", ""))
+                    suggestion = item.get("suggestion", "")
+                    emoji = {"high": "🔴", "critical": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚠️")
+                    lines.append(f"- {emoji} **{issue_type}**: {str(message)[:150]}")
+                    if suggestion:
+                        lines.append(f"  建议: {suggestion}")
+                else:
+                    lines.append(f"- ⚠️ {item}")
         lines.append("")
 
-    if result.get("missing_clauses"):
+    # ==================== 合规检查（ComplianceCheckResult） ====================
+    compliance_violations = result.get("compliance_violations", [])
+    compliance_status = result.get("compliance_status", "")
+    compliance_score = result.get("score", 0)
+    if compliance_violations or compliance_status or compliance_score:
+        lines.append("### ✅ 合规检查")
+        if compliance_status:
+            status_label = {"pass": "通过", "fail": "不通过", "warning": "有风险", "unknown": "未知"}.get(compliance_status, compliance_status)
+            lines.append(f"**合规状态**: {status_label}")
+        if compliance_score:
+            lines.append(f"**合规评分**: {compliance_score}/100")
+        if compliance_violations:
+            lines.append("")
+            lines.append("**违规项:**")
+            for v in compliance_violations:
+                if isinstance(v, dict):
+                    clause = v.get("clause", v.get("description", v.get("issue", "")))
+                    regulation = v.get("regulation", "")
+                    severity = v.get("severity", "")
+                    suggestion = v.get("suggestion", "")
+                    emoji = {"high": "🔴", "critical": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚠️")
+                    lines.append(f"- {emoji} {clause}")
+                    if regulation:
+                        lines.append(f"  相关法规: {regulation}")
+                    if suggestion:
+                        lines.append(f"  建议: {suggestion}")
+                else:
+                    lines.append(f"- ⚠️ {v}")
+        # 已检查法规
+        checked = result.get("checked_regulations", [])
+        if checked:
+            lines.append("")
+            lines.append("**已检查法规:**")
+            for reg in checked:
+                if isinstance(reg, dict):
+                    name = reg.get("regulation", reg.get("name", ""))
+                    status = reg.get("status", "")
+                    details = reg.get("details", "")
+                    status_label = {"compliant": "✅合规", "violation": "❌违规", "missing": "⚠️缺失"}.get(status, status)
+                    if name:
+                        lines.append(f"- {name} ({status_label})" if status_label else f"- {name}")
+                    if details and status != "compliant":
+                        lines.append(f"  {details}")
+        lines.append("")
+
+    # ==================== 缺失条款（跨 Agent） ====================
+    missing_clauses = result.get("missing_clauses", [])
+    if missing_clauses:
         lines.append("### 📋 缺失条款")
-        for c in result["missing_clauses"]:
+        for c in missing_clauses:
             lines.append(f"- ❌ {c}")
         lines.append("")
 
+    # ==================== 综合摘要 ====================
     if result.get("summary"):
         summary = result["summary"]
         lines.append("### 📊 综合摘要")
@@ -193,6 +315,7 @@ def _format_stream_result(result: dict, review_focus: list = None) -> str:
                 lines.append(text)
         lines.append("")
 
+    # ==================== 建议 ====================
     if result.get("recommendations"):
         lines.append("### 💡 建议")
         for rec in result["recommendations"]:
@@ -227,6 +350,46 @@ def _format_stream_result(result: dict, review_focus: list = None) -> str:
         lines.append("分析完成，但未找到相关信息。")
 
     return "\n".join(lines)
+
+
+@router.post("/review/stream_sse")
+async def review_stream_sse(request: ContractReviewRequest):
+    """
+    SSE 流式合同审查
+
+    返回 Server-Sent Events 流，前端可实时接收进度和结果。
+    事件类型: progress, result, error, done
+    """
+    import traceback as _tb
+
+    async def event_generator():
+        try:
+            async for event in task_manager.process_stream(
+                contract_text=request.contract_text,
+                contract_type=request.contract_type,
+                review_focus=request.review_focus,
+                contract_name=request.contract_name,
+                session_id=request.session_id,
+            ):
+                event_type = event.get("event", "message")
+                data = event.get("data", {})
+                data_str = json.dumps(data, ensure_ascii=False, default=str)
+                yield f"event: {event_type}\ndata: {data_str}\n\n"
+        except Exception as e:
+            logger.error(f"SSE 流式处理失败: {e}\n{_tb.format_exc()}")
+            error_data = json.dumps({"message": str(e)}, ensure_ascii=False)
+            yield f"event: error\ndata: {error_data}\n\n"
+        yield "event: done\ndata: {}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
