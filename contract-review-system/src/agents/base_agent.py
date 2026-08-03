@@ -5,18 +5,28 @@
 - bind_infrastructure(): 绑定共享内存和消息总线
 - read_shared() / write_shared(): 读写共享内存
 - publish_event(): 发布业务事件
+
+LangChain 高级抽象：
+- chat_structured(): 使用 with_structured_output() 返回 Pydantic 模型
+- prompt_template: 子类定义 ChatPromptTemplate
+- output_model: 子类定义输出 Pydantic 模型
 """
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type, TypeVar
 from datetime import datetime
 import asyncio
 import logging
+from pydantic import BaseModel
 from langchain_core.language_models import BaseLLM
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.prompts import ChatPromptTemplate
 
 from src.utils.llm_factory import get_llm
 from src.memory.memory_layer import MemoryLayer
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T", bound=BaseModel)
 
 
 class BaseAgent(ABC):
@@ -24,7 +34,17 @@ class BaseAgent(ABC):
     Agent基类
 
     所有专业Agent都应继承此类并实现抽象方法
+
+    LangChain 高级抽象支持：
+    - prompt_template: ChatPromptTemplate 实例，子类在类级别定义
+    - output_model: Pydantic 模型类，子类在类级别定义
+    - chat_structured(): 自动格式化 prompt + structured output
     """
+
+    # 子类覆盖：ChatPromptTemplate
+    prompt_template: Optional[ChatPromptTemplate] = None
+    # 子类覆盖：输出 Pydantic 模型
+    output_model: Optional[Type[BaseModel]] = None
 
     def __init__(
         self,
@@ -83,7 +103,7 @@ class BaseAgent(ABC):
 
     async def chat(self, message: str, system_prompt: Optional[str] = None) -> str:
         """
-        与LLM异步对话
+        与LLM异步对话（返回原始字符串）
 
         Args:
             message: 用户消息
@@ -93,6 +113,93 @@ class BaseAgent(ABC):
             LLM响应
         """
         return await self.wrapper.achat(message, system_prompt)
+
+    async def chat_structured(
+        self,
+        prompt_template: Optional[ChatPromptTemplate] = None,
+        output_model: Optional[Type[BaseModel]] = None,
+        **kwargs,
+    ) -> BaseModel:
+        """
+        使用 LangChain 高级抽象与 LLM 对话，返回结构化 Pydantic 模型。
+
+        流程：
+        1. 尝试 prompt_template → llm.with_structured_output(model).ainvoke()
+        2. 如果结果为空，fallback 到 raw chat + JSON 解析
+
+        Args:
+            prompt_template: ChatPromptTemplate（默认使用 self.prompt_template）
+            output_model: 输出 Pydantic 模型类（默认使用 self.output_model）
+            **kwargs: 填充 prompt 模板的变量
+
+        Returns:
+            Pydantic 模型实例
+        """
+        import json
+        import re
+
+        template = prompt_template or self.prompt_template
+        model = output_model or self.output_model
+
+        if template is None:
+            raise ValueError(f"{self.__class__.__name__} 未定义 prompt_template")
+        if model is None:
+            raise ValueError(f"{self.__class__.__name__} 未定义 output_model")
+
+        messages = template.format_messages(**kwargs)
+
+        # 方法1：尝试 with_structured_output
+        try:
+            structured_llm = self.llm.with_structured_output(model)
+            result = await structured_llm.ainvoke(messages)
+            # 检查结果是否为空（某些模型可能返回空结果）
+            if result and not self._is_empty_result(result):
+                return result
+            logger.debug("with_structured_output 返回空结果，尝试 fallback")
+        except Exception as e:
+            logger.debug(f"with_structured_output 失败: {e}，尝试 fallback")
+
+        # 方法2：Fallback — raw chat + JSON 解析
+        logger.info(f"[{self.__class__.__name__}] 使用 fallback: raw chat + JSON 解析")
+        from src.utils.llm_response import extract_llm_content
+        response = await self.llm.ainvoke(messages)
+        raw_content = response.content if hasattr(response, 'content') else str(response)
+        content = extract_llm_content(raw_content)
+
+        # 清理 markdown 代码块
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0]
+        content = content.strip()
+
+        # 尝试解析 JSON
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # 修复尾部逗号
+            fixed = re.sub(r',\s*([}\]])', r'\1', content)
+            parsed = json.loads(fixed)
+
+        # 转换为 Pydantic 模型
+        return model.model_validate(parsed)
+
+    def _is_empty_result(self, result: BaseModel) -> bool:
+        """检查 structured output 结果是否实质为空"""
+        data = result.model_dump()
+        # 检查是否有非空的列表字段
+        for value in data.values():
+            if isinstance(value, list) and len(value) > 0:
+                return False
+            if isinstance(value, dict):
+                for v in value.values():
+                    if isinstance(v, list) and len(v) > 0:
+                        return False
+                    if isinstance(v, str) and v:
+                        return False
+                    if isinstance(v, (int, float)) and v != 0:
+                        return False
+        return True
 
     def clear_history(self):
         """清空对话历史"""

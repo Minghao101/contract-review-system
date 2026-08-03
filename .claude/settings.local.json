@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(.venv/Scripts/python.exe -c ':*)",
-      "Bash(.venv/Scripts/python test_streaming.py)"
+      "Bash(.venv/Scripts/python test_streaming.py)",
+      "Bash(.venv/Scripts/python -c \"from src.agents.risk_assessment_agent import RiskAssessmentAgent; print\\('risk_assessment_agent OK'\\)\")",
+      "Bash(python -m pytest tests/test_agents.py::test_coordinator -v)"
     ]
   }
 }

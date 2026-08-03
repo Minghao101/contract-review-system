@@ -1,34 +1,49 @@
 """
-报告生成Agent模块 - LLM驱动，生成审查报告
+报告生成Agent模块 - 使用 LangChain 高级抽象（ChatPromptTemplate + structured output）
 """
 from typing import Any, Dict, Set
 from datetime import datetime
-import re
-import json
 import asyncio
 import logging
 
-from src.utils.llm_response import parse_json_from_llm
+from langchain_core.prompts import ChatPromptTemplate
 
 from .base_agent import BaseAgent
 from .business_events import BusinessEvent
+from .schemas import ReportResult
 from src.memory.memory_layer import MemoryLayer
 
 logger = logging.getLogger(__name__)
 
-try:
-    import json_repair
-    HAS_JSON_REPAIR = True
-except ImportError:
-    HAS_JSON_REPAIR = False
-
 
 class ReportGeneratorAgent(BaseAgent):
     """
-    报告生成Agent（LLM驱动版）
+    报告生成Agent（LangChain 高级抽象版）
 
-    使用LLM生成专业的审查报告
+    使用 ChatPromptTemplate 构建 prompt，with_structured_output 解析结果
     """
+
+    # 输出模型
+    output_model = ReportResult
+
+    # ==================== Prompt 模板 ====================
+
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("system", """你是一个专业的合同审查报告撰写专家。请根据以下分析结果生成一份完整的合同审查报告。
+
+报告要专业、清晰、易于理解。执行摘要要简洁明了，风险要按严重程度分类，建议要具体可执行，结论要明确。"""),
+        ("human", """分析结果上下文：
+
+文档解析结果: {document_info}
+
+条款分析结果: {clause_analysis}
+
+风险评估结果: {risk_assessment}
+
+合规检查结果: {compliance_result}
+
+请根据以上分析结果生成完整的审查报告。"""),
+    ])
 
     def __init__(
         self,
@@ -50,7 +65,6 @@ class ReportGeneratorAgent(BaseAgent):
             BusinessEvent.CLAUSE_ANALYZED,
             BusinessEvent.COMPLIANCE_CHECKED,
         ]
-        # Agent ID → 事件类型的映射（用于动态聚合）
         self._agent_to_event = {
             "risk_assessor": BusinessEvent.RISK_ANALYZED,
             "clause_analyst": BusinessEvent.CLAUSE_ANALYZED,
@@ -64,19 +78,14 @@ class ReportGeneratorAgent(BaseAgent):
     async def _handle_event(self, event_type: str, data: Dict[str, Any]):
         """
         聚合屏障：收到所有分析事件后才触发 process()
-
-        覆盖 BaseAgent 的默认实现，增加聚合逻辑。
-        根据 _required_agents 动态决定需要等待哪些事件。
         """
         async with self._aggregation_lock:
-            # 动态确定需要等待的事件（基于 _required_agents）
             required_agents = self.read_shared("_required_agents", MemoryLayer.CONTEXT) or []
             required_events = set()
             for agent_id in required_agents:
                 if agent_id in self._agent_to_event:
                     required_events.add(self._agent_to_event[agent_id])
 
-            # 如果没有设置 _required_agents，默认等待所有事件（兼容旧模式）
             if not required_events:
                 required_events = {
                     BusinessEvent.RISK_ANALYZED,
@@ -92,7 +101,6 @@ class ReportGeneratorAgent(BaseAgent):
             )
 
             if self._received_events >= required_events:
-                # 所有分析事件已到达，触发报告生成
                 self._received_events.clear()
                 logger.info(f"[{self.agent_id}] 聚合屏障归零：所有分析完成，触发报告生成")
                 task = {"session_id": data.get("session_id")}
@@ -107,14 +115,7 @@ class ReportGeneratorAgent(BaseAgent):
         数据来源（优先级）：
         1. 共享内存（事件驱动模式）
         2. task 参数（兼容旧模式）
-
-        Args:
-            task: 任务数据（兼容旧模式）
-
-        Returns:
-            报告生成结果
         """
-        # 优先从共享内存读取所有分析结果（事件驱动模式）
         previous_results = {}
         parsed = self.read_shared("document_parser", MemoryLayer.ANALYSIS)
         risk = self.read_shared("risk_assessor", MemoryLayer.ANALYSIS)
@@ -130,18 +131,15 @@ class ReportGeneratorAgent(BaseAgent):
         if compliance:
             previous_results["compliance_checker"] = {"result": compliance}
 
-        # 兼容旧模式：从 task 参数读取
         if not previous_results:
             previous_results = task.get("previous_results", {})
 
-        # 更新状态
         self.set_running(True)
         self.update_activity()
 
         try:
             logger.info("开始生成审查报告")
 
-            # LLM生成报告
             result = await self._generate_with_llm(previous_results)
 
             if "error" in result:
@@ -149,7 +147,7 @@ class ReportGeneratorAgent(BaseAgent):
 
             logger.info("审查报告生成完成")
 
-            # 阶段1：写入共享内存 DECISION 层 + 发布事件
+            # 写入共享内存 DECISION 层 + 发布事件
             self.write_shared("report_generator", result, MemoryLayer.DECISION, validate=False)
             risk_level = result.get("summary", {}).get("risk_level")
             if risk_level:
@@ -169,127 +167,41 @@ class ReportGeneratorAgent(BaseAgent):
 
     async def _generate_with_llm(self, previous_results: Dict[str, Any]) -> Dict[str, Any]:
         """
-        使用LLM生成报告
-
-        Args:
-            previous_results: 前面阶段的结果
-
-        Returns:
-            报告结果
+        使用 LangChain structured output 生成报告
         """
-        # 提取各阶段结果（key 与 Agent 写入的 agent_id 一致）
+        import json
+
         document_info = previous_results.get("document_parser", {}).get("result", {})
         clause_analysis = previous_results.get("clause_analyst", {}).get("result", {})
         risk_assessment = previous_results.get("risk_assessor", {}).get("result", {})
-
-        # 准备上下文
-        context = {
-            "document_info": document_info,
-            "clause_analysis": clause_analysis,
-            "risk_assessment": risk_assessment,
-        }
-
-        system_prompt = """你是一个专业的合同审查报告撰写专家。请根据以下分析结果生成一份完整的合同审查报告。
-
-输出格式要求（必须是严格有效的JSON）：
-{
-  "report": {
-    "title": "合同审查报告",
-    "executive_summary": "执行摘要（200字以内）",
-    "document_overview": {
-      "contract_type": "合同类型",
-      "parties": ["甲方", "乙方"],
-      "key_terms": "核心条款概述"
-    },
-    "completeness_analysis": {
-      "score": 0.8,
-      "found": ["已找到的条款"],
-      "missing": ["缺失的条款"],
-      "assessment": "完整性评估"
-    },
-    "risk_assessment": {
-      "overall_level": "风险等级",
-      "high_risks": ["高风险项"],
-      "medium_risks": ["中风险项"],
-      "low_risks": ["低风险项"]
-    },
-    "recommendations": [
-      {
-        "priority": "high/medium/low",
-        "category": "类别",
-        "content": "具体建议"
-      }
-    ],
-    "conclusion": {
-      "verdict": "建议签署/建议修改后签署/不建议签署",
-      "reason": "结论原因",
-      "next_steps": ["后续步骤"]
-    }
-  },
-  "summary": {
-    "risk_level": "风险等级",
-    "completeness_score": 0.8,
-    "total_issues": 5,
-    "verdict": "最终结论"
-  },
-  "visualization": {
-    "risk_distribution": {"high": 2, "medium": 3, "low": 1},
-    "completeness_bar": 80
-  }
-}
-
-规则：
-1. 报告要专业、清晰、易于理解
-2. 执行摘要要简洁明了
-3. 风险要按严重程度分类
-4. 建议要具体可执行
-5. 结论要明确
-6. 只输出JSON，不要其他内容"""
-
-        user_message = f"""分析结果上下文：
-{json.dumps(context, ensure_ascii=False, default=str)[:6000]}
-
-请根据以上分析结果生成完整的审查报告，只输出JSON。"""
+        compliance_result = previous_results.get("compliance_checker", {}).get("result", {})
 
         try:
-            content = await self.chat(user_message, system_prompt)
-
-            result = parse_json_from_llm(content)
-
-            if isinstance(result, dict):
-                result["generated_at"] = datetime.now().isoformat()
-                return result
+            result = await self.chat_structured(
+                document_info=json.dumps(document_info, ensure_ascii=False, default=str)[:2000],
+                clause_analysis=json.dumps(clause_analysis, ensure_ascii=False, default=str)[:2000],
+                risk_assessment=json.dumps(risk_assessment, ensure_ascii=False, default=str)[:2000],
+                compliance_result=json.dumps(compliance_result, ensure_ascii=False, default=str)[:2000],
+            )
+            result_dict = self._schema_to_dict(result)
+            result_dict["generated_at"] = datetime.now().isoformat()
+            return result_dict
         except Exception as e:
             logger.error(f"LLM报告生成失败: {e}")
 
-        # 回退到基础报告
-        return self._generate_basic_report(context)
+        return self._generate_basic_report({
+            "document_info": document_info,
+            "clause_analysis": clause_analysis,
+            "risk_assessment": risk_assessment,
+        })
 
-    def _parse_json(self, content: str) -> Any:
-        """容错JSON解析"""
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
-
-        content = content.strip()
-
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            pass
-
-        if HAS_JSON_REPAIR:
-            try:
-                return json_repair.loads(content)
-            except Exception:
-                pass
-
-        try:
-            fixed = re.sub(r',\s*([}\]])', r'\1', content)
-            return json.loads(fixed)
-        except json.JSONDecodeError:
-            return None
+    def _schema_to_dict(self, result: ReportResult) -> Dict[str, Any]:
+        """将 Pydantic 模型转换为兼容旧格式的字典"""
+        return {
+            "report": result.report.model_dump(),
+            "summary": result.summary.model_dump(),
+            "visualization": result.visualization.model_dump(),
+        }
 
     def _generate_basic_report(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """生成基础报告（回退）"""

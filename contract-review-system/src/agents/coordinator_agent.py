@@ -1,8 +1,9 @@
 """
-协调器Agent模块 - 处理问候和未知意图
+协调器Agent模块 - 处理问候、未知意图、协调多Agent协作
 """
+import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .base_agent import BaseAgent
 
@@ -11,12 +12,12 @@ logger = logging.getLogger(__name__)
 
 class CoordinatorAgent(BaseAgent):
     """
-    协调器Agent（简化版）
+    协调器Agent
 
     职责：
-    - 处理问候
-    - 处理未知意图
-    - 提供帮助信息
+    - 处理问候和未知意图
+    - 注册和管理子Agent
+    - 协调多Agent完成合同审查
     """
 
     def __init__(
@@ -29,10 +30,20 @@ class CoordinatorAgent(BaseAgent):
             agent_id=agent_id,
             name=name,
             role="coordinator",
-            description="处理问候和未知意图",
+            description="处理问候、未知意图、协调多Agent协作",
             **kwargs
         )
+        self._registered_agents: Dict[str, BaseAgent] = {}
         logger.info(f"协调器Agent初始化完成: {name}")
+
+    def register_agent(self, agent: BaseAgent):
+        """注册子Agent"""
+        self._registered_agents[agent.agent_id] = agent
+        logger.info(f"已注册Agent: {agent.name} ({agent.agent_id})")
+
+    def get_registered_agents(self) -> List[BaseAgent]:
+        """获取所有已注册的Agent"""
+        return list(self._registered_agents.values())
 
     async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -65,6 +76,11 @@ class CoordinatorAgent(BaseAgent):
                               "请上传或粘贴合同文本，告诉我您需要什么帮助。"
                 }
 
+            # 合同审查任务：协调已注册的Agent并行执行
+            contract_text = task.get("contract_text")
+            if contract_text and self._registered_agents:
+                return await self._execute_contract_review(task)
+
             # 未知意图
             if intent_type == "unknown":
                 return {
@@ -83,3 +99,64 @@ class CoordinatorAgent(BaseAgent):
 
         finally:
             self.set_running(False)
+
+    async def _execute_contract_review(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """协调多Agent并行执行合同审查"""
+        contract_text = task["contract_text"]
+        contract_type = task.get("contract_type", "general")
+        review_focus = task.get("review_focus", [])
+
+        # 先用 DocumentParser 解析合同
+        doc_parser = self._registered_agents.get("document_parser")
+        parse_result = None
+        if doc_parser:
+            parse_result = await doc_parser.process({
+                "contract_text": contract_text,
+                "contract_type": contract_type,
+            })
+
+        # 并行执行风险评估、条款分析、合规检查
+        risk_level = "unknown"
+        tasks_to_run = []
+        agent_names = []
+
+        for agent_id, agent in self._registered_agents.items():
+            if agent_id == "document_parser" or agent_id == "report_generator":
+                continue
+            if agent_id == "risk_assessor":
+                tasks_to_run.append(agent.process({
+                    "contract_text": contract_text,
+                    "contract_type": contract_type,
+                }))
+                agent_names.append(agent_id)
+            elif agent_id == "clause_analyst":
+                tasks_to_run.append(agent.process({
+                    "contract_text": contract_text,
+                    "review_focus": review_focus,
+                }))
+                agent_names.append(agent_id)
+            elif agent_id == "compliance_checker":
+                tasks_to_run.append(agent.process({
+                    "contract_text": contract_text,
+                    "contract_type": contract_type,
+                }))
+                agent_names.append(agent_id)
+
+        # 并行执行
+        results = await asyncio.gather(*tasks_to_run, return_exceptions=True)
+
+        # 收集风险等级
+        for i, result in enumerate(results):
+            if isinstance(result, dict) and "risk_level" in result:
+                risk_level = result["risk_level"]
+                break
+
+        return {
+            "status": "completed",
+            "risk_level": risk_level,
+            "parse_result": parse_result,
+            "analysis_results": {
+                name: result for name, result in zip(agent_names, results)
+                if not isinstance(result, Exception)
+            },
+        }

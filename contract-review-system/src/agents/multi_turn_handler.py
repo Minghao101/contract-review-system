@@ -1,5 +1,5 @@
 """
-多轮对话处理器 - 完全事件驱动调度器（启动协调者）
+多轮对话处理器 - 混合调度器
 
 职责：
 - 意图识别（不变）
@@ -8,6 +8,7 @@
 - 等待 task.completed 事件返回结果（asyncio.Event + 全局超时）
 - 问候/追问/未知意图直接处理（不变）
 - 异常兜底：超时熔断、Agent 失败降级
+- LangGraph 工作流集成（完整审查流程的替代执行路径）
 """
 import asyncio
 import contextvars
@@ -281,11 +282,19 @@ class MultiTurnHandler:
             runtime.completion_event.set()
         runtime.message_bus.subscribe_event(BusinessEvent.TASK_COMPLETED, _on_task_completed)
 
-        # 11. 执行事件驱动的 Agent 协作链
-        result = await self._execute_event_driven(runtime, intent.type)
+        # 11. 执行 LangGraph 工作流（替代事件驱动）
+        lg_result = await self._execute_with_langgraph(
+            session_id=session_id,
+            contract_text=effective_contract,
+            intent_type=intent.type,
+            auto_approve=True,
+        )
 
-        # 12. 从共享内存收集结果，存入上下文
-        all_results = self._collect_results(runtime)
+        # 12. 如果 LangGraph 失败，回退到事件驱动
+        if lg_result is not None:
+            all_results = lg_result
+        else:
+            all_results = self._collect_results(runtime)
         for agent_name, agent_result in all_results.items():
             ctx.set_agent_result(agent_name, agent_result)
 
@@ -1432,3 +1441,122 @@ class MultiTurnHandler:
             {"intent": "question_answer", "description": "问题回答", "requires_contract": False},
             {"intent": "greeting", "description": "问候", "requires_contract": False},
         ]
+
+    # ==================== LangGraph 工作流集成 ====================
+
+    async def _execute_with_langgraph(
+        self,
+        session_id: str,
+        contract_text: str,
+        intent_type: IntentType,
+        contract_type: str = "general",
+        review_focus: List[str] = None,
+        auto_approve: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        使用 LangGraph 工作流执行审查（支持 Checkpoint + Human-in-the-loop + Subgraph）
+
+        适用于 contract_review、risk_assessment、clause_analysis、compliance_check 等意图。
+
+        高级特性：
+        - Checkpoint: 每个 session_id 的状态自动持久化
+        - Human-in-the-loop: 报告生成前暂停等待用户审批
+        - Subgraph: 并行分析封装为子图
+
+        Args:
+            session_id: 会话ID（用作 checkpoint thread_id）
+            contract_text: 合同文本
+            intent_type: 意图类型
+            contract_type: 合同类型
+            review_focus: 审查重点
+            auto_approve: 是否自动审批（跳过 human_review interrupt）
+
+        Returns:
+            审查结果字典。如果暂停在 interrupt，返回包含 "interrupted" 和 "interrupt_value" 的字典。
+        """
+        try:
+            from src.workflow.review_workflow import ContractReviewWorkflow
+
+            workflow = ContractReviewWorkflow()
+            result = await workflow.run(
+                contract_text=contract_text,
+                contract_type=contract_type,
+                review_focus=review_focus or [],
+                intent_type=intent_type.value,
+                session_id=session_id,
+                auto_approve=auto_approve,
+            )
+
+            # 检查是否暂停在 interrupt
+            if result.get("status") == "pending" and "human_review" not in result.get("steps_completed", []):
+                # 已暂停在 interrupt，返回 interrupt 信息给前端
+                return {
+                    "interrupted": True,
+                    "interrupt_value": result.get("interrupt_value"),
+                    "session_id": session_id,
+                }
+
+            # 转换为兼容格式
+            all_results = {}
+            if result.get("parse_result"):
+                all_results["document_parser"] = result["parse_result"]
+            if result.get("clause_result"):
+                all_results["clause_analyst"] = result["clause_result"]
+            if result.get("risk_result"):
+                all_results["risk_assessor"] = result["risk_result"]
+            if result.get("compliance_result"):
+                all_results["compliance_checker"] = result["compliance_result"]
+            if result.get("report_result"):
+                all_results["report_generator"] = result["report_result"]
+
+            return all_results
+
+        except ImportError:
+            logger.warning("langgraph 未安装，回退到事件驱动模式")
+            return None
+        except Exception as e:
+            logger.error(f"LangGraph 工作流执行失败: {e}", exc_info=True)
+            return None
+
+    async def _resume_langgraph(
+        self,
+        session_id: str,
+        approved: bool,
+    ) -> Dict[str, Any]:
+        """
+        恢复被 interrupt 暂停的 LangGraph 工作流
+
+        Args:
+            session_id: 会话ID
+            approved: 是否批准生成报告
+
+        Returns:
+            审查结果字典
+        """
+        try:
+            from src.workflow.review_workflow import ContractReviewWorkflow
+
+            workflow = ContractReviewWorkflow()
+            result = await workflow.resume(session_id=session_id, approved=approved)
+
+            # 转换为兼容格式
+            all_results = {}
+            if result.get("parse_result"):
+                all_results["document_parser"] = result["parse_result"]
+            if result.get("clause_result"):
+                all_results["clause_analyst"] = result["clause_result"]
+            if result.get("risk_result"):
+                all_results["risk_assessor"] = result["risk_result"]
+            if result.get("compliance_result"):
+                all_results["compliance_checker"] = result["compliance_result"]
+            if result.get("report_result"):
+                all_results["report_generator"] = result["report_result"]
+
+            return all_results
+
+        except ImportError:
+            logger.warning("langgraph 未安装，回退到事件驱动模式")
+            return None
+        except Exception as e:
+            logger.error(f"LangGraph 工作流恢复失败: {e}", exc_info=True)
+            return None

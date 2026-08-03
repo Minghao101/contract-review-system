@@ -1,5 +1,10 @@
 """
 Agent模块 - 包含所有Agent实现
+
+LangChain 高级抽象：
+- schemas: Pydantic 输出模型（替代手动 JSON 解析）
+- BaseAgent.chat_structured(): 使用 with_structured_output() 返回结构化结果
+- 各 Agent 使用 ChatPromptTemplate 构建 prompt
 """
 
 from .base_agent import BaseAgent
@@ -19,6 +24,7 @@ from .conversation_context import (
     Message, TurnContext
 )
 from .multi_turn_handler import MultiTurnHandler
+from . import schemas
 
 __all__ = [
     "BaseAgent",
@@ -46,4 +52,5 @@ __all__ = [
     "Message",
     "TurnContext",
     "MultiTurnHandler",
+    "schemas",
 ]
