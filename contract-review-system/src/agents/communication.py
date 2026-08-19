@@ -156,67 +156,54 @@ class MessageBus:
         else:
             del self._event_subscribers[event_type]
 
-    def publish(self, message: AgentMessage):
-        """
-        同步发布消息
+    def _notify_callbacks(self, callbacks: list, message: AgentMessage):
+        """通知回调列表（同步）"""
+        for callback in callbacks:
+            try:
+                callback(message)
+            except Exception as e:
+                logger.error(f"消息回调失败: {e}")
 
-        通知所有匹配的订阅者（receiver_id 精确匹配或订阅者为 "*"）。
-        同时触发事件类型订阅者。
-        """
-        self._message_queue.append(message)
-        self._record_event(message)
+    async def _notify_callbacks_async(self, callbacks: list, message: AgentMessage):
+        """通知回调列表（异步，自动处理同步/异步回调）"""
+        for callback in callbacks:
+            try:
+                if asyncio.iscoroutinefunction(callback):
+                    await callback(message)
+                else:
+                    callback(message)
+            except Exception as e:
+                logger.error(f"异步消息回调失败: {e}")
 
-        # 通知 agent_id 订阅者
+    def _get_matching_callbacks(self, message: AgentMessage) -> tuple:
+        """获取匹配的订阅者回调列表"""
+        agent_callbacks = []
         for agent_id, callbacks in self._subscribers.items():
             if agent_id == message.receiver_id or agent_id == "*":
-                for callback in callbacks:
-                    try:
-                        callback(message)
-                    except Exception as e:
-                        logger.error(f"消息回调失败 [{agent_id}]: {e}")
+                agent_callbacks.extend(callbacks)
 
-        # 通知事件类型订阅者
+        event_callbacks = []
         event_type = message.content.get("event") if isinstance(message.content, dict) else None
         if event_type and event_type in self._event_subscribers:
-            for callback in self._event_subscribers[event_type]:
-                try:
-                    callback(message)
-                except Exception as e:
-                    logger.error(f"事件回调失败 [{event_type}]: {e}")
+            event_callbacks.extend(self._event_subscribers[event_type])
+
+        return agent_callbacks, event_callbacks
+
+    def publish(self, message: AgentMessage):
+        """同步发布消息"""
+        self._message_queue.append(message)
+        self._record_event(message)
+        agent_callbacks, event_callbacks = self._get_matching_callbacks(message)
+        self._notify_callbacks(agent_callbacks, message)
+        self._notify_callbacks(event_callbacks, message)
 
     async def publish_async(self, message: AgentMessage):
-        """
-        异步发布消息
-
-        用于 Agent 事件驱动协作，回调为异步函数时自动 await。
-        同时触发事件类型订阅者。
-        """
+        """异步发布消息"""
         self._message_queue.append(message)
         self._record_event(message)
-
-        # 通知 agent_id 订阅者
-        for agent_id, callbacks in self._subscribers.items():
-            if agent_id == message.receiver_id or agent_id == "*":
-                for callback in callbacks:
-                    try:
-                        if asyncio.iscoroutinefunction(callback):
-                            await callback(message)
-                        else:
-                            callback(message)
-                    except Exception as e:
-                        logger.error(f"异步消息回调失败 [{agent_id}]: {e}")
-
-        # 通知事件类型订阅者
-        event_type = message.content.get("event") if isinstance(message.content, dict) else None
-        if event_type and event_type in self._event_subscribers:
-            for callback in self._event_subscribers[event_type]:
-                try:
-                    if asyncio.iscoroutinefunction(callback):
-                        await callback(message)
-                    else:
-                        callback(message)
-                except Exception as e:
-                    logger.error(f"异步事件回调失败 [{event_type}]: {e}")
+        agent_callbacks, event_callbacks = self._get_matching_callbacks(message)
+        await self._notify_callbacks_async(agent_callbacks, message)
+        await self._notify_callbacks_async(event_callbacks, message)
 
     def _record_event(self, message: AgentMessage):
         """记录事件历史（调试用）"""

@@ -13,7 +13,6 @@ import json
 import time
 from typing import Dict, Any
 from src.agents import (
-    BaseAgent,
     CoordinatorAgent,
     DocumentParserAgent,
     ClauseAnalysisAgent,
@@ -24,7 +23,6 @@ from src.agents import (
     AgentMessage,
     MessageType,
 )
-from src.memory.shared_memory import SharedMemoryManager
 from src.memory.memory_layer import MemoryLayer
 
 
@@ -606,55 +604,3 @@ def test_coordinator_registration():
     return True
 
 
-# ============================================================
-# 主测试运行器
-# ============================================================
-
-def run_all_tests():
-    """运行所有Agent协作测试"""
-    print("=" * 60)
-    print("Day 16: Agent协作测试")
-    print("=" * 60)
-
-    tests = [
-        ("端到端完整审查", test_end_to_end_full_review),
-        ("端到端最小合同", test_end_to_end_minimal_contract),
-        ("端到端空合同处理", test_end_to_end_empty_contract),
-        ("MessageBus基本通信", test_message_bus_basic),
-        ("Agent消息类型", test_agent_message_types),
-        ("多Agent间通信", test_multi_agent_communication),
-        ("共享记忆基本读写", test_shared_memory_basic),
-        ("共享记忆查询", test_shared_memory_query),
-        ("共享记忆通知机制", test_shared_memory_notification),
-        ("并行Agent处理", test_parallel_agent_processing),
-        ("协调器注册管理", test_coordinator_registration),
-    ]
-
-    results = []
-    for name, test_func in tests:
-        try:
-            result = test_func()
-            results.append((name, result))
-        except Exception as e:
-            print(f"  ✗ {name} 测试失败: {e}")
-            import traceback
-            traceback.print_exc()
-            results.append((name, False))
-
-    passed = sum(1 for _, r in results if r)
-    total = len(results)
-
-    print("=" * 60)
-    print(f"测试结果: {passed}/{total} 通过")
-    print("=" * 60)
-
-    for name, result in results:
-        status = "✓" if result else "✗"
-        print(f"  {status} {name}")
-
-    return passed == total
-
-
-if __name__ == "__main__":
-    success = run_all_tests()
-    sys.exit(0 if success else 1)

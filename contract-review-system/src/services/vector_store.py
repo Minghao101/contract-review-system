@@ -19,6 +19,22 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+# DashScope Embedding 客户端（延迟初始化）
+_dashscope_embedder = None
+
+
+def _get_dashscope_embedder():
+    """获取 DashScope Embedding 客户端"""
+    global _dashscope_embedder
+    if _dashscope_embedder is None:
+        from llama_index.embeddings.dashscope import DashScopeEmbedding
+        _dashscope_embedder = DashScopeEmbedding(
+            model_name=settings.EMBEDDING_MODEL,
+            api_key=settings.DASHSCOPE_API_KEY,
+        )
+        logger.info(f"初始化 DashScope Embedding: {settings.EMBEDDING_MODEL}")
+    return _dashscope_embedder
+
 
 class QdrantVectorStore:
     """
@@ -42,20 +58,26 @@ class QdrantVectorStore:
         self._http_client = httpx.Client(timeout=30)
 
     def _encode(self, texts: List[str]) -> List[List[float]]:
-        """调用远程Embedding API获取向量"""
-        resp = self._http_client.post(
-            settings.EMBEDDING_URL,
-            json={"model": settings.EMBEDDING_MODEL, "input": texts},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        # 兼容 Ollama 格式: {"embeddings": [[...], ...]}
-        if "embeddings" in data:
-            return data["embeddings"]
-        # 兼容 OpenAI 格式: {"data": [{"embedding": [...]}]}
-        if "data" in data:
-            return [item["embedding"] for item in data["data"]]
-        raise ValueError(f"未知的embedding响应格式: {list(data.keys())}")
+        """调用Embedding API获取向量"""
+        if settings.EMBEDDING_PROVIDER == "dashscope":
+            # 使用 DashScope Embedding
+            embedder = _get_dashscope_embedder()
+            return embedder.get_text_embedding_batch(texts)
+        else:
+            # 使用 Ollama Embedding (兼容旧模式)
+            resp = self._http_client.post(
+                settings.EMBEDDING_URL,
+                json={"model": settings.EMBEDDING_MODEL, "input": texts},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            # 兼容 Ollama 格式: {"embeddings": [[...], ...]}
+            if "embeddings" in data:
+                return data["embeddings"]
+            # 兼容 OpenAI 格式: {"data": [{"embedding": [...]}]}
+            if "data" in data:
+                return [item["embedding"] for item in data["data"]]
+            raise ValueError(f"未知的embedding响应格式: {list(data.keys())}")
 
     def _ensure_collection(self, collection_name: str, dimension: int = None):
         """确保集合存在"""

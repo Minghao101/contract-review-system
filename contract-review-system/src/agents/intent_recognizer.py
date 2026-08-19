@@ -34,6 +34,7 @@ class IntentType(str, Enum):
     TOPIC_FOLLOW_UP = "topic_follow_up"  # 追问已有议题
     QUESTION_ANSWER = "question_answer"
     GREETING = "greeting"
+    FAREWELL = "farewell"       # 结束对话
     UNKNOWN = "unknown"
 
 
@@ -94,6 +95,7 @@ INTENT_DESCRIPTIONS = {
     IntentType.TOPIC_FOLLOW_UP: "追问已有议题。当用户对之前讨论过的议题进行追问、假设性分析时使用。特征：'如果改成...'、'换个角度看'、'再看看...'、'假如...'、'换个条件呢'",
     IntentType.QUESTION_ANSWER: "回答关于合同的问题。当用户提问但不涉及审查/分析/评估时使用",
     IntentType.GREETING: "问候语。当用户打招呼时使用",
+    IntentType.FAREWELL: "结束对话。当用户说再见、结束、谢谢、不需要了、没了、完成、拜拜等表示要结束对话时使用",
     IntentType.UNKNOWN: "无法识别的意图",
 }
 
@@ -175,34 +177,36 @@ class IntentRecognizer:
 
 核心规则（按优先级）：
 1. 用户打招呼 → greeting
-2. 用户追问之前的结果（"之前"、"刚才"、"哪一份"、"第一条"、"第二条"、"什么意思"、"解释一下"、"详细说说"、"为什么"） → question_answer
-3. 用户要求修改条款 → modify_contract。关键词包括：
+2. 用户说再见、结束、谢谢、不需要了、没了、完成、拜拜、再见等表示结束对话 → farewell
+3. 用户追问之前的结果（"之前"、"刚才"、"哪一份"、"第一条"、"第二条"、"什么意思"、"解释一下"、"详细说说"、"为什么"） → question_answer
+4. 用户要求修改条款 → modify_contract。关键词包括：
    - "把第X条...改成..."、"删除第X条"、"增加一条..."、"修改..."
    - "加上..."、"添加..."、"加入..."、"补充..."
    - "改成..."、"改为..."、"换成..."、"替换..."
    - "去掉..."、"移除..."
    - 注意：如果用户说"加上XX，再评估风险"，主意图是modify_contract（修改优先于分析）
-4. 用户对合同的某个具体条款、风险点或合规问题提出讨论，希望多个角度分析 → topic_raise。特征：
+5. 用户对合同的某个具体条款、风险点或合规问题提出讨论，希望多个角度分析 → topic_raise。特征：
    - "第X条合理吗"、"这个条款怎么样"、"XX条款有什么问题"
    - "讨论一下第X条"、"分析一下这个风险"
    - "这个违约金合理吗"、"保密条款有问题吗"
    - 注意：topic_raise 是用户发起一个具体问题让多个Agent共同讨论，不同于risk_assessment（完整风险评估）或clause_analysis（完整条款分析）
-5. 用户对之前讨论过的议题进行追问、假设性分析 → topic_follow_up。特征：
+6. 用户对之前讨论过的议题进行追问、假设性分析 → topic_follow_up。特征：
    - "如果改成..."、"换个角度看"、"再看看..."
    - "假如..."、"换个条件呢"、"如果改为..."
-6. 用户提到"风险"或要求评估风险 → risk_assessment（即使用户说"分析风险"也是risk_assessment，不是contract_review）
-7. 用户提到"合规"或要求检查合规 → compliance_check
-8. 用户提到"条款"或要求分析条款 → clause_analysis
-9. 用户要求生成/导出报告 → report_generation
-10. 只有用户明确说"完整审查"、"全面审查"、"整体审查" → contract_review
-11. 其他提问 → question_answer
-12. 无法判断 → unknown
+7. 用户提到"风险"或要求评估风险 → risk_assessment（即使用户说"分析风险"也是risk_assessment，不是contract_review）
+8. 用户提到"合规"或要求检查合规 → compliance_check
+9. 用户提到"条款"或要求分析条款 → clause_analysis
+10. 用户要求生成/导出报告 → report_generation
+11. 只有用户明确说"完整审查"、"全面审查"、"整体审查" → contract_review
+12. 其他提问 → question_answer
+13. 无法判断 → unknown
 
 重要：
 - 修改意图优先于分析意图！如果用户同时要求"修改+分析"，识别为modify_contract
 - 议题讨论(topic_raise)优先于单一维度分析！如果用户问"第X条的违约金合理吗"，这是topic_raise（多Agent讨论），不是risk_assessment
 - 用户问"这个合同有什么风险"是risk_assessment，不是contract_review！
 - 如果对话轮数>0，用户问"第X条建议什么意思"、"解释一下"、"为什么"等，都是question_answer，是在追问之前的结果！
+- 如果对话轮数>0，用户提到"分析一下XX风险"、"详细说说XX风险"、"XX风险是什么意思"等，是question_answer，是在追问之前的风险评估结果，不是新的risk_assessment！
 
 可选意图类型：
 {intent_list}

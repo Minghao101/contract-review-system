@@ -28,6 +28,12 @@ class ContractReviewRequest(BaseModel):
     session_id: Optional[str] = Field(default=None, description="会话ID（用于多轮对话）")
 
 
+class ResumeRequest(BaseModel):
+    """恢复工作流请求"""
+    session_id: str = Field(..., description="会话ID")
+    user_reply: str = Field(..., description="用户回复内容")
+
+
 class TaskResponse(BaseModel):
     """任务响应"""
     task_id: str
@@ -371,6 +377,8 @@ async def review_stream_sse(request: ContractReviewRequest):
                 contract_name=request.contract_name,
                 session_id=request.session_id,
             ):
+                if not isinstance(event, dict):
+                    continue
                 event_type = event.get("event", "message")
                 data = event.get("data", {})
                 data_str = json.dumps(data, ensure_ascii=False, default=str)
@@ -556,3 +564,20 @@ async def upload_contract_file_sync(
     }
 
     return result
+
+
+@router.post("/review/resume")
+async def resume_review(request: ResumeRequest):
+    """
+    恢复被 interrupt 暂停的工作流
+
+    用于多轮对话场景，用户回复后继续执行
+    """
+    try:
+        result = await task_manager.resume_workflow(
+            session_id=request.session_id,
+            user_reply=request.user_reply,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

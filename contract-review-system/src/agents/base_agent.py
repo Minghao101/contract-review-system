@@ -187,19 +187,19 @@ class BaseAgent(ABC):
     def _is_empty_result(self, result: BaseModel) -> bool:
         """检查 structured output 结果是否实质为空"""
         data = result.model_dump()
-        # 检查是否有非空的列表字段
-        for value in data.values():
-            if isinstance(value, list) and len(value) > 0:
-                return False
-            if isinstance(value, dict):
-                for v in value.values():
-                    if isinstance(v, list) and len(v) > 0:
-                        return False
-                    if isinstance(v, str) and v:
-                        return False
-                    if isinstance(v, (int, float)) and v != 0:
-                        return False
-        return True
+
+        def _has_value(v):
+            if isinstance(v, list):
+                return len(v) > 0
+            if isinstance(v, dict):
+                return any(_has_value(val) for val in v.values())
+            if isinstance(v, str):
+                return bool(v)
+            if isinstance(v, (int, float)):
+                return v != 0
+            return v is not None
+
+        return not any(_has_value(v) for v in data.values())
 
     def clear_history(self):
         """清空对话历史"""

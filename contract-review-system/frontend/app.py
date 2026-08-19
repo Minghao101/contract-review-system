@@ -263,7 +263,7 @@ def _apply_custom_css():
     .risk-tag.medium { background: #fffbeb; color: #d97706; }
     .risk-tag.low { background: #f0fdf4; color: #16a34a; }
 
-    /* ========== 加载动画 ========== */
+    /* ==================== */
     .typing-indicator {
         display: flex;
         gap: 4px;

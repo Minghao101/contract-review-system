@@ -306,9 +306,11 @@ class TaskManager:
             contract_text=contract_text,
             file_info={"contract_type": contract_type},
         ):
+            if not isinstance(event, dict):
+                continue
             # 在最终结果返回时保存到长期记忆
-            if event.get("event") == "result":
-                try:
+            try:
+                if event.get("event") == "result":
                     from src.memory.long_term_memory import get_long_term_memory
                     memory = get_long_term_memory()
                     content = event.get("data", {}).get("content", "")
@@ -318,8 +320,8 @@ class TaskManager:
                         result={"response": content, "status": "completed"},
                     )
                     logger.info(f"已保存审查记忆: {contract_name}")
-                except Exception as e:
-                    logger.warning(f"保存审查记忆失败: {e}")
+            except Exception as e:
+                logger.warning(f"保存审查记忆失败: {e}")
 
             yield event
 
@@ -367,6 +369,31 @@ class TaskManager:
     ) -> list:
         """列出任务（从持久化存储）"""
         return self.persistence.list_tasks(status=status, limit=limit)
+
+    async def resume_workflow(
+        self,
+        session_id: str,
+        user_reply: str,
+    ) -> Dict[str, Any]:
+        """
+        恢复被 interrupt 暂停的工作流
+
+        Args:
+            session_id: 会话ID
+            user_reply: 用户回复内容
+
+        Returns:
+            恢复后的处理结果
+        """
+        try:
+            result = await self._handler.resume_workflow(
+                session_id=session_id,
+                approved=user_reply,
+            )
+            return result
+        except Exception as e:
+            logger.error(f"工作流恢复失败: {e}")
+            return {"error": str(e)}
 
 
 class RabbitMQConsumer:

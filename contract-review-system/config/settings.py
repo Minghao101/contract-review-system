@@ -40,9 +40,11 @@ class Settings(BaseSettings):
     RABBITMQ_URL: Optional[str] = Field(default=None, description="RabbitMQ连接URL（优先使用）")
 
     # Embedding配置
-    EMBEDDING_MODEL: str = Field(default="bge-m3:latest", description="嵌入模型")
-    EMBEDDING_URL: str = Field(default="http://10.0.81.167:11434/api/embed", description="Embedding服务地址")
-    EMBEDDING_VECTOR_SIZE: int = Field(default=1024, description="向量维度")
+    EMBEDDING_PROVIDER: str = Field(default="dashscope", description="Embedding提供商: dashscope 或 ollama")
+    EMBEDDING_MODEL: str = Field(default="text-embedding-v2", description="嵌入模型")
+    EMBEDDING_URL: str = Field(default="http://10.0.81.167:11434/api/embed", description="Embedding服务地址(ollama)")
+    EMBEDDING_VECTOR_SIZE: int = Field(default=1536, description="向量维度")
+    DASHSCOPE_API_KEY: Optional[str] = Field(default=None, description="DashScope API密钥")
 
     # Qdrant向量数据库配置
     QDRANT_URL: str = Field(default="http://192.168.70.57:6333", description="Qdrant服务地址")

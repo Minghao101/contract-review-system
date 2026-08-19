@@ -34,10 +34,13 @@ def render_chat_interface():
     if "session_id" not in st.session_state:
         import uuid
         st.session_state["session_id"] = str(uuid.uuid4())
+    if "awaiting_interrupt" not in st.session_state:
+        st.session_state["awaiting_interrupt"] = False
+    if "interrupt_session_id" not in st.session_state:
+        st.session_state["interrupt_session_id"] = None
 
-    # 每次脚本执行开始时清除已显示标记，确保消息正常渲染
-    # _displayed_indices 仅用于当前执行中防止流式输出/错误消息重复渲染
-    st.session_state["_displayed_indices"] = set()
+    # _displayed_indices 用于防止流式输出/错误消息重复渲染
+    # 不在每次执行时清空，而是持久化保存已渲染的消息索引
 
     # 页面标题
     _render_header()
@@ -149,6 +152,13 @@ def _handle_user_input(user_input: str):
     user_idx = len(st.session_state["messages"]) - 1
     st.session_state.setdefault("_displayed_indices", set()).add(user_idx)
 
+    # 如果正在等待 interrupt 恢复（追问场景）
+    if st.session_state.get("awaiting_interrupt"):
+        st.session_state["awaiting_interrupt"] = False
+        session_id = st.session_state.get("interrupt_session_id")
+        _resume_with_backend(session_id, user_input)
+        return
+
     # 获取上传的文件内容
     contract_text = st.session_state.get("uploaded_file_content")
     file_name = st.session_state.get("uploaded_file_name", "未知文件")
@@ -217,6 +227,77 @@ def _query_memory(query: str):
         "content": content,
         "timestamp": datetime.now().strftime("%H:%M:%S")
     })
+
+
+def _resume_with_backend(session_id: str, user_reply: str):
+    """恢复被 interrupt 暂停的工作流"""
+    try:
+        import json as _json
+
+        # 显示处理状态
+        status_placeholder = st.empty()
+        status_placeholder.caption("🔄 正在继续分析...")
+
+        with st.chat_message("assistant", avatar="🤖"):
+            response = requests.post(
+                f"{API_BASE_URL}/review/resume",
+                json={
+                    "session_id": session_id,
+                    "user_reply": user_reply,
+                },
+                timeout=300,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                content = data.get("response", "")
+                if content:
+                    st.markdown(content)
+                    st.session_state["messages"].append({
+                        "role": "assistant",
+                        "content": content,
+                        "timestamp": datetime.now().strftime("%H:%M:%S")
+                    })
+                    idx = len(st.session_state["messages"]) - 1
+                    st.session_state.setdefault("_displayed_indices", set()).add(idx)
+
+                    # 检查是否还有新的 interrupt
+                    if data.get("status") == "awaiting_input":
+                        st.session_state["awaiting_interrupt"] = True
+                        st.session_state["interrupt_session_id"] = session_id
+                        st.info(f"💡 {data.get('message', '如需详细分析某个风险点，请告诉我。')}")
+                else:
+                    st.markdown("分析完成，但未返回结果。")
+            else:
+                st.error(f"❌ 后端错误: {response.status_code}")
+
+            status_placeholder.empty()
+
+    except requests.exceptions.ConnectionError:
+        error_msg = "❌ 无法连接到后端服务，请确认 FastAPI 已启动。"
+        with st.chat_message("assistant", avatar="🤖"):
+            st.markdown(error_msg)
+        st.session_state["messages"].append({
+            "role": "assistant",
+            "content": error_msg,
+            "timestamp": datetime.now().strftime("%H:%M:%S")
+        })
+        idx = len(st.session_state["messages"]) - 1
+        st.session_state.setdefault("_displayed_indices", set()).add(idx)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"恢复工作流失败: {e}\n{tb}")
+        error_msg = f"❌ 恢复失败: {str(e)}\n\n```\n{tb[-500:]}\n```"
+        with st.chat_message("assistant", avatar="🤖"):
+            st.markdown(error_msg)
+        st.session_state["messages"].append({
+            "role": "assistant",
+            "content": error_msg,
+            "timestamp": datetime.now().strftime("%H:%M:%S")
+        })
+        idx = len(st.session_state["messages"]) - 1
+        st.session_state.setdefault("_displayed_indices", set()).add(idx)
 
 
 def _process_with_backend(contract_text: str, question: str, file_name: str):
@@ -299,6 +380,15 @@ def _process_with_backend(contract_text: str, question: str, file_name: str):
                         status_placeholder.empty()
                         st.error(f"❌ {msg}")
                         result_content = f"❌ {msg}"
+
+                    elif current_event == "interrupt":
+                        # 处理 interrupt 事件（等待用户追问）
+                        interrupt_type = data.get("type", "")
+                        if interrupt_type == "awaiting_follow_up":
+                            st.session_state["awaiting_interrupt"] = True
+                            st.session_state["interrupt_session_id"] = st.session_state.get("session_id")
+                            status_placeholder.empty()
+                            st.info(f"💡 {data.get('message', '如需详细分析某个风险点，请告诉我。')}")
 
                     elif current_event == "done":
                         break

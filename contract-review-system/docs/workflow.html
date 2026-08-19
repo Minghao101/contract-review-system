@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能合同审查系统 - LangGraph 工作流</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            color: white;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .subtitle {
+            text-align: center;
+            color: rgba(255,255,255,0.9);
+            font-size: 1.1rem;
+            margin-bottom: 40px;
+        }
+
+        .workflow-card {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+            margin-bottom: 30px;
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            color: #1a1a2e;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-title::before {
+            content: '';
+            width: 4px;
+            height: 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 2px;
+        }
+
+        /* 工作流图表 */
+        .workflow-diagram {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            padding: 30px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            margin: 20px 0;
+        }
+
+        .node {
+            padding: 16px 24px;
+            border-radius: 12px;
+            font-weight: 600;
+            text-align: center;
+            min-width: 200px;
+            position: relative;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .node:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+        }
+
+        .node-start {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            border-radius: 30px;
+        }
+
+        .node-process {
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+            color: white;
+        }
+
+        .node-decision {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+            color: white;
+            transform: rotate(0deg);
+        }
+
+        .node-action {
+            background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+            color: white;
+        }
+
+        .node-end {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            color: white;
+            border-radius: 30px;
+        }
+
+        .node-loop {
+            background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+            color: white;
+        }
+
+        .arrow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #6b7280;
+            font-size: 1.5rem;
+        }
+
+        .arrow-down::after {
+            content: '↓';
+        }
+
+        .arrow-right::after {
+            content: '→';
+        }
+
+        /* 分支布局 */
+        .branch-container {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .branch {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .branch-label {
+            background: #e5e7eb;
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            color: #4b5563;
+        }
+
+        /* 循环指示器 */
+        .loop-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 30px;
+            margin-top: 20px;
+        }
+
+        .loop-arrow {
+            font-size: 1.5rem;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* 节点详情 */
+        .node-details {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 30px;
+        }
+
+        .detail-card {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            border-left: 4px solid;
+        }
+
+        .detail-card.start { border-color: #10b981; }
+        .detail-card.process { border-color: #3b82f6; }
+        .detail-card.decision { border-color: #f59e0b; }
+        .detail-card.action { border-color: #8b5cf6; }
+        .detail-card.end { border-color: #ef4444; }
+        .detail-card.loop { border-color: #06b6d4; }
+
+        .detail-card h3 {
+            font-size: 1.1rem;
+            color: #1a1a2e;
+            margin-bottom: 10px;
+        }
+
+        .detail-card p {
+            color: #6b7280;
+            font-size: 0.95rem;
+            line-height: 1.6;
+        }
+
+        .detail-card code {
+            background: #e5e7eb;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            color: #374151;
+        }
+
+        /* 意图映射表 */
+        .intent-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+
+        .intent-table th,
+        .intent-table td {
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .intent-table th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #374151;
+        }
+
+        .intent-table tr:hover {
+            background: #f8f9fa;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        .badge-analysis {
+            background: #dbeafe;
+            color: #1d4ed8;
+        }
+
+        .badge-followup {
+            background: #fef3c7;
+            color: #b45309;
+        }
+
+        .badge-topic {
+            background: #ede9fe;
+            color: #7c3aed;
+        }
+
+        .badge-direct {
+            background: #d1fae5;
+            color: #047857;
+        }
+
+        /* 特性列表 */
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .feature {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 16px;
+            background: #f8f9fa;
+            border-radius: 12px;
+        }
+
+        .feature-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 1.2rem;
+            flex-shrink: 0;
+        }
+
+        .feature-content h4 {
+            color: #1a1a2e;
+            margin-bottom: 4px;
+        }
+
+        .feature-content p {
+            color: #6b7280;
+            font-size: 0.9rem;
+        }
+
+        /* 响应式 */
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 1.8rem;
+            }
+
+            .workflow-card {
+                padding: 20px;
+            }
+
+            .branch-container {
+                flex-direction: column;
+            }
+
+            .node {
+                min-width: 150px;
+                padding: 12px 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 智能合同审查系统</h1>
+        <p class="subtitle">基于 LangGraph 的多轮对话工作流架构</p>
+
+        <!-- 工作流拓扑图 -->
+        <div class="workflow-card">
+            <h2 class="section-title">工作流拓扑</h2>
+
+            <div class="workflow-diagram">
+                <!-- 起点 -->
+                <div class="node node-start">🚀 START</div>
+                <div class="arrow arrow-down"></div>
+
+                <!-- 处理用户输入 -->
+                <div class="node node-process">📥 process_user_input<br><small>处理用户输入</small></div>
+                <div class="arrow arrow-down"></div>
+
+                <!-- 意图识别 -->
+                <div class="node node-decision">🧠 recognize_intent<br><small>意图识别</small></div>
+                <div class="arrow arrow-down"></div>
+
+                <!-- 条件路由 -->
+                <div class="node node-loop">🔀 route_by_intent<br><small>条件路由</small></div>
+
+                <!-- 分支 -->
+                <div class="branch-container">
+                    <!-- 分支1: 分析类 -->
+                    <div class="branch">
+                        <span class="branch-label">analysis</span>
+                        <div class="arrow arrow-down"></div>
+                        <div class="node node-action">📊 execute_analysis_agents<br><small>执行分析Agent</small></div>
+                        <div class="arrow arrow-down"></div>
+                    </div>
+
+                    <!-- 分支2: 追问 -->
+                    <div class="branch">
+                        <span class="branch-label">follow_up</span>
+                        <div class="arrow arrow-down"></div>
+                        <div class="node node-action">💬 handle_follow_up<br><small>处理追问</small></div>
+                        <div class="arrow arrow-down"></div>
+                    </div>
+
+                    <!-- 分支3: 议题讨论 -->
+                    <div class="branch">
+                        <span class="branch-label">topic</span>
+                        <div class="arrow arrow-down"></div>
+                        <div class="node node-action">📝 handle_topic_discussion<br><small>议题讨论</small></div>
+                        <div class="arrow arrow-down"></div>
+                    </div>
+
+                    <!-- 分支4: 直接回复 -->
+                    <div class="branch">
+                        <span class="branch-label">direct</span>
+                        <div class="arrow arrow-down"></div>
+                        <div class="node node-action">↩️ generate_response<br><small>生成回复</small></div>
+                    </div>
+                </div>
+
+                <!-- 汇聚到生成回复 -->
+                <div class="arrow arrow-down"></div>
+                <div class="node node-process">💬 generate_response<br><small>生成最终回复</small></div>
+
+                <!-- 循环判断 -->
+                <div class="arrow arrow-down"></div>
+                <div class="loop-indicator">
+                    <span class="loop-arrow">🔄</span>
+                    <span>awaiting_follow_up? → 循环回 process_user_input</span>
+                    <span class="loop-arrow">🔄</span>
+                </div>
+
+                <!-- 终点 -->
+                <div class="arrow arrow-down"></div>
+                <div class="node node-end">🛑 END</div>
+            </div>
+        </div>
+
+        <!-- 节点详情 -->
+        <div class="workflow-card">
+            <h2 class="section-title">节点详情</h2>
+
+            <div class="node-details">
+                <div class="detail-card start">
+                    <h3>🚀 START / END</h3>
+                    <p>工作流的入口和出口点。LangGraph 自动管理状态的初始化和清理。</p>
+                </div>
+
+                <div class="detail-card process">
+                    <h3>📥 process_user_input</h3>
+                    <p>处理用户输入，添加到对话历史，更新轮次计数器。</p>
+                    <p>状态：<code>turn_count += 1</code></p>
+                </div>
+
+                <div class="detail-card decision">
+                    <h3>🧠 recognize_intent</h3>
+                    <p>使用 LLM Function Calling 识别用户意图，支持 10+ 种意图类型。</p>
+                    <p>输出：<code>intent_type</code>, <code>confidence</code></p>
+                </div>
+
+                <div class="detail-card loop">
+                    <h3>🔀 route_by_intent</h3>
+                    <p>根据意图类型和对话状态路由到对应处理节点。</p>
+                    <p>特殊逻辑：<code>awaiting_follow_up</code> 时强制走 follow_up</p>
+                </div>
+
+                <div class="detail-card action">
+                    <h3>📊 execute_analysis_agents</h3>
+                    <p>并行执行多个分析 Agent（风险评估、条款分析、合规检查等）。</p>
+                    <p>使用：<code>asyncio.gather</code> 并行执行</p>
+                </div>
+
+                <div class="detail-card action">
+                    <h3>💬 handle_follow_up</h3>
+                    <p>处理用户追问，利用对话历史和合同内容生成详细回答。</p>
+                    <p>完成后设置：<code>awaiting_follow_up = True</code></p>
+                </div>
+
+                <div class="detail-card action">
+                    <h3>📝 handle_topic_discussion</h3>
+                    <p>多 Agent 讨论具体议题，生成综合结论。</p>
+                    <p>参与者：<code>risk_assessor</code>, <code>clause_analyst</code>, <code>compliance_checker</code></p>
+                </div>
+
+                <div class="detail-card process">
+                    <h3>💬 generate_response</h3>
+                    <p>根据 Agent 结果生成用户友好的回复，格式化输出。</p>
+                    <p>风险评估后设置：<code>awaiting_follow_up = True</code></p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 意图路由映射 -->
+        <div class="workflow-card">
+            <h2 class="section-title">意图路由映射</h2>
+
+            <table class="intent-table">
+                <thead>
+                    <tr>
+                        <th>意图类型</th>
+                        <th>路由路径</th>
+                        <th>触发条件</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>contract_review</code></td>
+                        <td><span class="badge badge-analysis">analysis</span></td>
+                        <td>完整审查、全面审查、整体审查</td>
+                    </tr>
+                    <tr>
+                        <td><code>risk_assessment</code></td>
+                        <td><span class="badge badge-analysis">analysis</span></td>
+                        <td>风险、评估风险、分析风险</td>
+                    </tr>
+                    <tr>
+                        <td><code>clause_analysis</code></td>
+                        <td><span class="badge badge-analysis">analysis</span></td>
+                        <td>条款、分析条款</td>
+                    </tr>
+                    <tr>
+                        <td><code>compliance_check</code></td>
+                        <td><span class="badge badge-analysis">analysis</span></td>
+                        <td>合规、合法、检查合规</td>
+                    </tr>
+                    <tr>
+                        <td><code>modify_contract</code></td>
+                        <td><span class="badge badge-analysis">analysis</span></td>
+                        <td>修改条款、删除条款、增加条款</td>
+                    </tr>
+                    <tr>
+                        <td><code>question_answer</code></td>
+                        <td><span class="badge badge-followup">follow_up</span></td>
+                        <td>追问、解释、为什么</td>
+                    </tr>
+                    <tr>
+                        <td><code>topic_raise</code></td>
+                        <td><span class="badge badge-topic">topic</span></td>
+                        <td>讨论某条款、分析某风险点</td>
+                    </tr>
+                    <tr>
+                        <td><code>topic_follow_up</code></td>
+                        <td><span class="badge badge-topic">topic</span></td>
+                        <td>假设性分析、换个角度</td>
+                    </tr>
+                    <tr>
+                        <td><code>greeting</code></td>
+                        <td><span class="badge badge-direct">direct</span></td>
+                        <td>打招呼</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 核心特性 -->
+        <div class="workflow-card">
+            <h2 class="section-title">核心特性</h2>
+
+            <div class="features">
+                <div class="feature">
+                    <div class="feature-icon">🔄</div>
+                    <div class="feature-content">
+                        <h4>循环追问</h4>
+                        <p>风险评估后自动进入追问模式，支持多轮深入分析</p>
+                    </div>
+                </div>
+
+                <div class="feature">
+                    <div class="feature-icon">💾</div>
+                    <div class="feature-content">
+                        <h4>Checkpoint 持久化</h4>
+                        <p>使用 MemorySaver 自动保存状态，支持断点恢复</p>
+                    </div>
+                </div>
+
+                <div class="feature">
+                    <div class="feature-icon">⚡</div>
+                    <div class="feature-content">
+                        <h4>并行 Agent 执行</h4>
+                        <p>多个分析 Agent 并行执行，提高处理效率</p>
+                    </div>
+                </div>
+
+                <div class="feature">
+                    <div class="feature-icon">🎯</div>
+                    <div class="feature-content">
+                        <h4>智能意图识别</h4>
+                        <p>基于 LLM Function Calling 的意图分类，准确率高</p>
+                    </div>
+                </div>
+
+                <div class="feature">
+                    <div class="feature-icon">👨‍💻</div>
+                    <div class="feature-content">
+                        <h4>Human-in-the-loop</h4>
+                        <p>可选的人工审批节点，关键决策需人工确认</p>
+                    </div>
+                </div>
+
+                <div class="feature">
+                    <div class="feature-icon">📡</div>
+                    <div class="feature-content">
+                        <h4>流式输出</h4>
+                        <p>实时推送执行进度，支持 SSE 流式响应</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 技术栈 -->
+        <div class="workflow-card">
+            <h2 class="section-title">技术栈</h2>
+
+            <div class="features">
+                <div class="feature">
+                    <div class="feature-icon">🔗</div>
+                    <div class="feature-content">
+                        <h4>LangGraph</h4>
+                        <p>状态图工作流引擎，支持条件路由和循环</p>
+                    </div>
+                </div>
+
+                <div class="feature">
+                    <div class="feature-icon">🦜</div>
+                    <div class="feature-content">
+                        <h4>LangChain</h4>
+                        <p>LLM 编排框架，提供 Prompt 模板和工具调用</p>
+                    </div>
+                </div>
+
+                <div class="feature">
+                    <div class="feature-icon">🤖</div>
+                    <div class="feature-content">
+                        <h4>MIMO LLM</h4>
+                        <p>大语言模型，支持 Function Calling 和结构化输出</p>
+                    </div>
+                </div>
+
+                <div class="feature">
+                    <div class="feature-icon">⚡</div>
+                    <div class="feature-content">
+                        <h4>FastAPI</h4>
+                        <p>异步 Web 框架，提供 RESTful API</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

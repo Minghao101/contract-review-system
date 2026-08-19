@@ -16,20 +16,17 @@ from .memory_layer import MemoryLayer
 
 logger = logging.getLogger(__name__)
 
-# 延迟导入 Schema 校验器（避免循环引用）
-_schema_validator = None
+
+def _validate_shared_data(key: str, value: Any) -> bool:
+    """校验共享数据（降级版本，总是通过）"""
+    return True
 
 
-def _get_schema_validator():
-    """延迟加载 Schema 校验器"""
-    global _schema_validator
-    if _schema_validator is None:
-        try:
-            from src.agents.shared_data_schemas import validate_shared_data
-            _schema_validator = validate_shared_data
-        except ImportError:
-            _schema_validator = lambda k, v: True  # 降级：不校验
-    return _schema_validator
+try:
+    from ..agents.shared_data_schemas import validate_shared_data
+    _schema_validator = validate_shared_data
+except ImportError:
+    _schema_validator = _validate_shared_data  # 降级：不校验
 
 
 class MemoryEntry:
@@ -119,8 +116,7 @@ class SharedMemoryManager:
         """
         # Schema 校验
         if validate:
-            validator = _get_schema_validator()
-            if not validator(key, value):
+            if not _schema_validator(key, value):
                 logger.warning(
                     f"共享数据校验失败: key={key}, agent={agent_id}, layer={layer.value}。"
                     f"数据不符合 Schema 定义，拒绝写入。"
@@ -171,10 +167,8 @@ class SharedMemoryManager:
             记忆值，不存在返回None
         """
         with self._lock:
-            if key in self._store[layer]:
-                entry = self._store[layer][key]
-                return entry.value
-            return None
+            entry = self._store[layer].get(key)
+            return entry.value if entry else None
 
     def read_with_meta(
         self,
@@ -189,9 +183,7 @@ class SharedMemoryManager:
             MemoryEntry对象
         """
         with self._lock:
-            if key in self._store[layer]:
-                return self._store[layer][key]
-            return None
+            return self._store[layer].get(key)
 
     def query(
         self,
@@ -282,10 +274,7 @@ class SharedMemoryManager:
     def export_all(self) -> Dict[str, Any]:
         """导出所有记忆（用于持久化）"""
         with self._lock:
-            result = {}
-            for layer in MemoryLayer:
-                result[layer.value] = {
-                    key: entry.to_dict()
-                    for key, entry in self._store[layer].items()
-                }
-            return result
+            return {
+                layer.value: {key: entry.to_dict() for key, entry in entries.items()}
+                for layer, entries in self._store.items()
+            }
